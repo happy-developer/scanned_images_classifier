@@ -1,0 +1,14 @@
+﻿# Runtime/train dependencies
+kagglehub
+torch
+torchvision
+numpy
+pillow
+scikit-learn
+matplotlib
+tqdm
+timm
+torchmetrics
+seaborn
+opencv-python
+grad-cam==1.4.6
