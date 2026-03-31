@@ -196,12 +196,13 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
 
     train_records, eval_records = load_default_train_eval(
         data_root=config.data_root,
-        train_csv=config.train_csv,
+        train_csvs=config.train_csvs,
         eval_csv=config.eval_csv,
-        image_subdir_train=config.image_subdir_train,
+        image_subdirs_train=config.image_subdirs_train,
         image_subdir_eval=config.image_subdir_eval,
     )
-    train_records = train_records[: config.max_train_samples]
+    if config.max_train_samples > 0:
+        train_records = train_records[: config.max_train_samples]
     if config.max_eval_samples > 0:
         eval_records = eval_records[: config.max_eval_samples]
 
@@ -222,6 +223,7 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
         model.generation_config.num_beams = max(1, int(config.generation_num_beams))
         model.generation_config.length_penalty = float(config.generation_length_penalty)
         model.generation_config.no_repeat_ngram_size = max(0, int(config.generation_no_repeat_ngram_size))
+        model.generation_config.repetition_penalty = float(config.generation_repetition_penalty)
 
     train_ds = OCRDataset(train_records, processor, config.max_target_length)
     eval_ds = OCRDataset(eval_records, processor, config.max_target_length)
@@ -273,11 +275,11 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
     processor.save_pretrained(final_dir)
 
     meta = {
-        "version": "trocr-small-printed-cpu-v1",
+        "version": f"{config.model_name.replace('/', '-')}-ocr-cpu-v2",
         "model_name": config.model_name,
         "task": "ocr_image_to_text",
         "source_dataset": str(config.data_root),
-        "train_csv": config.train_csv,
+        "train_csvs": list(config.train_csvs),
         "eval_csv": config.eval_csv,
     }
     _write_json(config.output_dir / "model_meta.json", meta)

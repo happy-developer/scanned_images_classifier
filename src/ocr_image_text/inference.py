@@ -35,6 +35,7 @@ class Predictor:
             "num_beams": max(1, int(self.infer_config.num_beams)),
             "length_penalty": float(self.infer_config.length_penalty),
             "no_repeat_ngram_size": max(0, int(self.infer_config.no_repeat_ngram_size)),
+            "repetition_penalty": float(self.infer_config.repetition_penalty),
             "do_sample": float(self.infer_config.temperature) > 0.0,
         }
         if suppress_tokens:
@@ -73,6 +74,7 @@ def load_predictor(config: InferConfig) -> Predictor:
         model.generation_config.num_beams = max(1, int(config.num_beams))
         model.generation_config.length_penalty = float(config.length_penalty)
         model.generation_config.no_repeat_ngram_size = max(0, int(config.no_repeat_ngram_size))
+        model.generation_config.repetition_penalty = float(config.repetition_penalty)
     model.to("cpu")
     model.eval()
     return Predictor(model=model, processor=processor, infer_config=config)

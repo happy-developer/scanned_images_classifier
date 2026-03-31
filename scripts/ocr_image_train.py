@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -13,18 +13,32 @@ if str(PROJECT_ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train OCR image->text model on batch_1 CSV labels.")
     parser.add_argument("--data-root", type=str, default="")
-    parser.add_argument("--output-dir", type=str, default="artifacts/doc_understanding_ocr_cpu")
+    parser.add_argument("--output-dir", type=str, default="notebooks/artifacts/doc_understanding_ocr_cpu")
     parser.add_argument("--model-name", type=str, default="microsoft/trocr-small-printed")
-    parser.add_argument("--train-csv", type=str, default="batch_1/batch_1/batch1_1.csv")
+    parser.add_argument(
+        "--train-csvs",
+        type=str,
+        default="batch_1/batch_1/batch1_1.csv,batch_1/batch_1/batch1_3.csv",
+        help="Comma-separated training CSV list",
+    )
     parser.add_argument("--eval-csv", type=str, default="batch_1/batch_1/batch1_2.csv")
-    parser.add_argument("--image-subdir-train", type=str, default="batch_1/batch_1/batch1_1")
+    parser.add_argument(
+        "--image-subdirs-train",
+        type=str,
+        default="batch_1/batch_1/batch1_1,batch_1/batch_1/batch1_3",
+        help="Comma-separated image subdir list matching --train-csvs order",
+    )
     parser.add_argument("--image-subdir-eval", type=str, default="batch_1/batch_1/batch1_2")
-    parser.add_argument("--max-train-samples", type=int, default=512)
+    parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--max-eval-samples", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--train-batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
+    parser.add_argument("--num-beams", type=int, default=4)
+    parser.add_argument("--length-penalty", type=float, default=1.0)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=3)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
     return parser.parse_args()
 
 
@@ -35,13 +49,15 @@ def main() -> None:
     from src.ocr_image_text.train import run_training
 
     data_root = resolve_default_data_root(args.data_root)
+    train_csvs = tuple(s.strip() for s in args.train_csvs.split(",") if s.strip())
+    image_subdirs_train = tuple(s.strip() for s in args.image_subdirs_train.split(",") if s.strip())
     cfg = TrainConfig(
         data_root=data_root,
         output_dir=Path(args.output_dir).resolve(),
         model_name=args.model_name,
-        train_csv=args.train_csv,
+        train_csvs=train_csvs,
         eval_csv=args.eval_csv,
-        image_subdir_train=args.image_subdir_train,
+        image_subdirs_train=image_subdirs_train,
         image_subdir_eval=args.image_subdir_eval,
         max_train_samples=args.max_train_samples,
         max_eval_samples=args.max_eval_samples,
@@ -49,6 +65,10 @@ def main() -> None:
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
+        generation_num_beams=args.num_beams,
+        generation_length_penalty=args.length_penalty,
+        generation_no_repeat_ngram_size=args.no_repeat_ngram_size,
+        generation_repetition_penalty=args.repetition_penalty,
     )
     summary = run_training(cfg)
     print(json.dumps(summary, indent=2, ensure_ascii=False))

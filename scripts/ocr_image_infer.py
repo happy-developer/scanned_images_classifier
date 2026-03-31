@@ -12,12 +12,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run OCR image->text inference on one image.")
-    parser.add_argument("--artifacts-dir", type=str, default="artifacts/doc_understanding_ocr_cpu")
+    parser.add_argument("--artifacts-dir", type=str, default="notebooks/artifacts/doc_understanding_ocr_cpu")
     parser.add_argument("--data-root", type=str, default="")
     parser.add_argument("--image", type=str, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--num-beams", type=int, default=1)
+    parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--length-penalty", type=float, default=1.0)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=3)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
     return parser.parse_args()
 
 
@@ -43,6 +46,9 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         num_beams=args.num_beams,
         temperature=args.temperature,
+        length_penalty=args.length_penalty,
+        no_repeat_ngram_size=args.no_repeat_ngram_size,
+        repetition_penalty=args.repetition_penalty,
     )
     predictor = load_predictor(cfg)
     image_path = _resolve_image(args.image, data_root)

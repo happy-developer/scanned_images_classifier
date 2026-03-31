@@ -206,7 +206,13 @@ def build_predict_fn(config: AppConfig):
     model, processor, device = _load_ocr_backend(config.model_dir)
     model_version = _load_model_version(config.model_dir, config.model_meta_path)
 
-    def _predict(image_path: str, max_new_tokens: int, num_beams: int) -> Tuple[str, Dict[str, Any]]:
+    def _predict(
+        image_path: str,
+        max_new_tokens: int,
+        num_beams: int,
+        no_repeat_ngram_size: int,
+        repetition_penalty: float,
+    ) -> Tuple[str, Dict[str, Any]]:
         if not image_path:
             err = AppError("INVALID_INPUT", "Aucune image fournie.").to_dict()
             return "", err
@@ -234,7 +240,8 @@ def build_predict_fn(config: AppConfig):
                 "max_new_tokens": int(max_new_tokens),
                 "num_beams": max(1, int(num_beams)),
                 "length_penalty": 1.0,
-                "no_repeat_ngram_size": 3,
+                "no_repeat_ngram_size": max(0, int(no_repeat_ngram_size)),
+                "repetition_penalty": max(1.0, float(repetition_penalty)),
                 "early_stopping": True,
             }
             if suppress_tokens:
@@ -290,6 +297,10 @@ def build_app(config: AppConfig):
             with gr.Column():
                 max_tokens_input = gr.Slider(minimum=16, maximum=1024, step=16, value=256, label="max_new_tokens")
                 num_beams_input = gr.Slider(minimum=1, maximum=8, step=1, value=4, label="num_beams")
+                no_repeat_input = gr.Slider(minimum=0, maximum=8, step=1, value=3, label="no_repeat_ngram_size")
+                repetition_penalty_input = gr.Slider(
+                    minimum=1.0, maximum=2.0, step=0.05, value=1.1, label="repetition_penalty"
+                )
                 run_button = gr.Button("Run OCR", variant="primary")
 
         extracted_text_output = gr.Textbox(label="Extracted text", lines=12)
@@ -297,7 +308,7 @@ def build_app(config: AppConfig):
 
         run_button.click(
             fn=predict_fn,
-            inputs=[image_input, max_tokens_input, num_beams_input],
+            inputs=[image_input, max_tokens_input, num_beams_input, no_repeat_input, repetition_penalty_input],
             outputs=[extracted_text_output, output_json],
         )
 

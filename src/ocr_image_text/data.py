@@ -3,7 +3,7 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,10 @@ def load_ocr_csv(csv_path: Path, image_dir: Path) -> List[OCRRecord]:
     records: List[OCRRecord] = []
     with csv_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
+        expected_cols = {"File Name", "OCRed Text"}
+        missing = expected_cols.difference(set(reader.fieldnames or []))
+        if missing:
+            raise ValueError(f"CSV missing required columns {sorted(missing)}: {csv_path}")
         for row in reader:
             img_name = str(row.get("File Name", "")).strip()
             text = str(row.get("OCRed Text", "")).strip()
@@ -37,14 +41,42 @@ def load_ocr_csv(csv_path: Path, image_dir: Path) -> List[OCRRecord]:
     return records
 
 
+def load_multi_ocr_sources(
+    data_root: Path,
+    csv_paths: Sequence[str],
+    image_subdirs: Sequence[str],
+) -> List[OCRRecord]:
+    if len(csv_paths) != len(image_subdirs):
+        raise ValueError("csv_paths and image_subdirs must have the same length")
+
+    merged: List[OCRRecord] = []
+    seen: set[str] = set()
+    for csv_rel, image_rel in zip(csv_paths, image_subdirs):
+        records = load_ocr_csv(data_root / csv_rel, data_root / image_rel)
+        for rec in records:
+            key = str(rec.image_path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(rec)
+
+    if not merged:
+        raise ValueError("No valid OCR records found across provided train sources")
+    return merged
+
+
 def load_default_train_eval(
     data_root: Path,
-    train_csv: str,
+    train_csvs: Sequence[str],
     eval_csv: str,
-    image_subdir_train: str,
+    image_subdirs_train: Sequence[str],
     image_subdir_eval: str,
 ) -> Tuple[List[OCRRecord], List[OCRRecord]]:
-    train_records = load_ocr_csv(data_root / train_csv, data_root / image_subdir_train)
+    train_records = load_multi_ocr_sources(
+        data_root=data_root,
+        csv_paths=train_csvs,
+        image_subdirs=image_subdirs_train,
+    )
     eval_records = load_ocr_csv(data_root / eval_csv, data_root / image_subdir_eval)
     return train_records, eval_records
 
