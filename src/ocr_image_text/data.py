@@ -65,6 +65,24 @@ def load_multi_ocr_sources(
     return merged
 
 
+def load_images_from_subdirs(data_root: Path, image_subdirs: Sequence[str]) -> List[Path]:
+    images: List[Path] = []
+    seen: set[str] = set()
+    patterns = ("*.jpg", "*.jpeg", "*.png", "*.webp")
+    for image_rel in image_subdirs:
+        folder = data_root / image_rel
+        if not folder.exists():
+            continue
+        for pattern in patterns:
+            for img in folder.glob(pattern):
+                key = str(img.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                images.append(img.resolve())
+    return sorted(images)
+
+
 def load_default_train_eval(
     data_root: Path,
     train_csvs: Sequence[str],

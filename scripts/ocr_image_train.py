@@ -18,27 +18,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train-csvs",
         type=str,
-        default="batch_1/batch_1/batch1_1.csv,batch_1/batch_1/batch1_3.csv",
+        default="batch_1/batch_1/batch1_1.csv,batch_1/batch_1/batch1_2.csv,batch_1/batch_1/batch1_3.csv",
         help="Comma-separated training CSV list",
     )
-    parser.add_argument("--eval-csv", type=str, default="batch_1/batch_1/batch1_2.csv")
+    parser.add_argument("--eval-csv", type=str, default="")
     parser.add_argument(
         "--image-subdirs-train",
         type=str,
-        default="batch_1/batch_1/batch1_1,batch_1/batch_1/batch1_3",
+        default="batch_1/batch_1/batch1_1,batch_1/batch_1/batch1_2,batch_1/batch_1/batch1_3",
         help="Comma-separated image subdir list matching --train-csvs order",
     )
-    parser.add_argument("--image-subdir-eval", type=str, default="batch_1/batch_1/batch1_2")
+    parser.add_argument("--image-subdir-eval", type=str, default="batch_2/batch_2/batch2_1")
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--max-eval-samples", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--train-batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
+    parser.add_argument("--image-size", type=int, default=768)
+    parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
     parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=3)
-    parser.add_argument("--repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=4)
+    parser.add_argument("--repetition-penalty", type=float, default=1.15)
     return parser.parse_args()
 
 
@@ -65,6 +67,8 @@ def main() -> None:
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
+        image_size=args.image_size,
+        use_grayscale=not args.no_grayscale,
         generation_num_beams=args.num_beams,
         generation_length_penalty=args.length_penalty,
         generation_no_repeat_ngram_size=args.no_repeat_ngram_size,

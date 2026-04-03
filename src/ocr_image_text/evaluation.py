@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, Sequence
 
 from .data import OCRRecord
 from .formatting import normalize_text
@@ -30,89 +30,104 @@ def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator) if denominator else 0.0
 
 
-def _extract_key_fields(text: str) -> Dict[str, str]:
-    t = normalize_text(text).lower()
-    one_line = re.sub(r"\s+", " ", t)
-
-    invoice = ""
-    m_invoice = re.search(r"invoice\s*(?:no|number|#)\s*[:\-]?\s*([a-z0-9\-\/]+)", one_line)
-    if m_invoice:
-        invoice = m_invoice.group(1).strip()
-
-    date = ""
-    m_date = re.search(r"\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b", one_line)
-    if m_date:
-        date = m_date.group(1).strip()
-
-    vat = ""
-    m_vat = re.search(r"vat[^%\n]{0,30}(\d{1,2}(?:[.,]\d+)?\s*%)", one_line)
-    if not m_vat:
-        m_vat = re.search(r"\b(\d{1,2}(?:[.,]\d+)?\s*%)\b", one_line)
-    if m_vat:
-        vat = re.sub(r"\s+", "", m_vat.group(1))
-
-    total = ""
-    m_total = re.search(
-        r"(?:gross\s*worth|total|amount\s*due|net\s*worth)[^0-9]{0,20}([0-9]+(?:[.,][0-9]{2})?)",
-        one_line,
-    )
-    if m_total:
-        total = m_total.group(1).strip()
-
-    return {
-        "invoice_no": invoice,
-        "date": date,
-        "total": total,
-        "vat": vat,
-    }
+def _tokenize(text: str) -> list[str]:
+    return [token for token in re.split(r"\s+", normalize_text(text).strip().lower()) if token]
 
 
-def evaluate_records(records: Iterable[OCRRecord], predictions: Dict[str, str]) -> dict:
-    rows: List[dict] = []
-    field_names = ["invoice_no", "date", "total", "vat"]
-    field_correct = {name: 0 for name in field_names}
-    field_covered = {name: 0 for name in field_names}
+def repetition_rate(text: str) -> float:
+    normalized = normalize_text(text)
+    chars = [ch for ch in normalized if not ch.isspace()]
+    char_rate = 0.0
+    if chars:
+        char_rate = _safe_div(len(chars) - len(set(chars)), len(chars))
+
+    tokens = _tokenize(text)
+    token_rate = 0.0
+    if tokens:
+        token_rate = _safe_div(len(tokens) - len(set(tokens)), len(tokens))
+
+    # Heuristic that captures both repeated characters and repeated tokens.
+    return max(char_rate, token_rate)
+
+
+def evaluate_records(
+    records: Iterable[OCRRecord],
+    predictions: Dict[str, str],
+    *,
+    compute_wer: bool = True,
+) -> dict:
+    records = list(records)
+    if not records:
+        payload: dict[str, object] = {
+            "mode": "supervised",
+            "num_samples": 0,
+            "cer": 0.0,
+            "non_empty_rate": 0.0,
+            "avg_prediction_chars": 0.0,
+            "avg_reference_chars": 0.0,
+            "prediction_reference_length_ratio": 0.0,
+            "repetition_rate": 0.0,
+            "total_prediction_chars": 0,
+            "total_reference_chars": 0,
+        }
+        if compute_wer:
+            payload["wer"] = 0.0
+        return payload
+
+    total_char_edits = 0
+    total_ref_chars = 0
+    total_pred_chars = 0
+    total_word_edits = 0
+    total_ref_words = 0
+    non_empty = 0
+    repetition_sum = 0.0
 
     for rec in records:
         target = normalize_text(rec.ocr_text)
         pred = normalize_text(predictions.get(rec.img_name, ""))
-        char_edits = _levenshtein(pred, target)
-        target_chars = max(len(target), 1)
-        pred_words = pred.split()
-        target_words = target.split()
-        word_edits = _levenshtein(pred_words, target_words)
-        target_word_count = max(len(target_words), 1)
 
-        target_fields = _extract_key_fields(target)
-        pred_fields = _extract_key_fields(pred)
-        for field in field_names:
-            target_value = target_fields.get(field, "")
-            pred_value = pred_fields.get(field, "")
-            if target_value:
-                field_covered[field] += 1
-                field_correct[field] += int(pred_value == target_value)
+        total_char_edits += _levenshtein(pred, target)
+        total_pred_chars += len(pred)
+        total_ref_chars += len(target)
+        non_empty += int(bool(pred.strip()))
+        repetition_sum += repetition_rate(pred)
 
-        rows.append(
-            {
-                "img_name": rec.img_name,
-                "exact_match": int(pred == target),
-                "cer": _safe_div(char_edits, target_chars),
-                "char_accuracy": max(0.0, 1.0 - _safe_div(char_edits, target_chars)),
-                "word_accuracy": max(0.0, 1.0 - _safe_div(word_edits, target_word_count)),
-            }
-        )
+        if compute_wer:
+            target_words = _tokenize(target)
+            pred_words = _tokenize(pred)
+            total_word_edits += _levenshtein(pred_words, target_words)
+            total_ref_words += len(target_words)
 
-    if not rows:
-        return {"num_samples": 0, "exact_match": 0.0, "avg_char_accuracy": 0.0, "avg_word_accuracy": 0.0}
+    num_samples = len(records)
+    payload = {
+        "mode": "supervised",
+        "num_samples": num_samples,
+        "cer": _safe_div(total_char_edits, total_ref_chars),
+        "non_empty_rate": _safe_div(non_empty, num_samples),
+        "avg_prediction_chars": _safe_div(total_pred_chars, num_samples),
+        "avg_reference_chars": _safe_div(total_ref_chars, num_samples),
+        "prediction_reference_length_ratio": _safe_div(total_pred_chars, total_ref_chars),
+        "repetition_rate": _safe_div(repetition_sum, num_samples),
+        "total_prediction_chars": total_pred_chars,
+        "total_reference_chars": total_ref_chars,
+    }
+    if compute_wer:
+        payload["wer"] = _safe_div(total_word_edits, total_ref_words)
+    return payload
+
+
+def summarize_predictions(predictions: Iterable[str]) -> dict:
+    normalized_predictions = [normalize_text(pred) for pred in predictions]
+    num_samples = len(normalized_predictions)
+    total_pred_chars = sum(len(pred) for pred in normalized_predictions)
+    non_empty = sum(int(bool(pred.strip())) for pred in normalized_predictions)
+    repetition = _safe_div(sum(repetition_rate(pred) for pred in normalized_predictions), num_samples)
 
     return {
-        "num_samples": len(rows),
-        "exact_match": sum(r["exact_match"] for r in rows) / len(rows),
-        "avg_cer": sum(r["cer"] for r in rows) / len(rows),
-        "avg_char_accuracy": sum(r["char_accuracy"] for r in rows) / len(rows),
-        "avg_word_accuracy": sum(r["word_accuracy"] for r in rows) / len(rows),
-        "field_exact_match": {
-            field: _safe_div(field_correct[field], field_covered[field]) for field in field_names
-        },
-        "field_coverage": field_covered,
+        "mode": "unlabeled",
+        "num_samples": num_samples,
+        "non_empty_rate": _safe_div(non_empty, num_samples),
+        "avg_prediction_chars": _safe_div(total_pred_chars, num_samples),
+        "repetition_rate": repetition,
+        "total_prediction_chars": total_pred_chars,
     }

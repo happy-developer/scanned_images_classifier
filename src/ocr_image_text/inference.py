@@ -1,16 +1,44 @@
 ﻿from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-import torch
 from PIL import Image
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
 from .config import InferConfig
-from .formatting import normalize_text
+from .page_ocr import _run_crop_first_ocr
+
+
+def _set_processor_resize(processor: Any, image_size: int, model: Any | None = None) -> int:
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        return int(max(32, image_size))
+
+    side = int(max(32, image_size))
+    supported = None
+    if model is not None:
+        enc_cfg = getattr(getattr(model, "config", None), "encoder", None)
+        if enc_cfg is not None and getattr(enc_cfg, "image_size", None) is not None:
+            supported = int(enc_cfg.image_size)
+        elif getattr(getattr(model, "encoder", None), "config", None) is not None:
+            mcfg = model.encoder.config
+            if getattr(mcfg, "image_size", None) is not None:
+                supported = int(mcfg.image_size)
+    if supported is not None:
+        side = min(side, supported)
+
+    image_processor.do_resize = True
+    image_processor.size = {"height": side, "width": side}
+    return side
+
+
+def _preprocess_image(image_path: Path, use_grayscale: bool) -> Image.Image:
+    image = Image.open(image_path).convert("RGB")
+    if use_grayscale:
+        image = image.convert("L").convert("RGB")
+    return image
 
 
 @dataclass
@@ -18,39 +46,41 @@ class Predictor:
     model: Any
     processor: Any
     infer_config: InferConfig
+    effective_image_size: int
 
-    def predict(self, image_path: Path) -> Dict[str, Any]:
-        image = Image.open(image_path).convert("RGB")
-        inputs = self.processor(images=image, return_tensors="pt")
-        start = time.perf_counter()
-        tok = self.processor.tokenizer
-        suppress_tokens = []
-        if tok.bos_token_id is not None:
-            suppress_tokens.append(int(tok.bos_token_id))
-        if tok.pad_token_id is not None:
-            suppress_tokens.append(int(tok.pad_token_id))
-        gen_kwargs = {
-            "pixel_values": inputs.pixel_values,
-            "max_new_tokens": self.infer_config.max_new_tokens,
-            "num_beams": max(1, int(self.infer_config.num_beams)),
-            "length_penalty": float(self.infer_config.length_penalty),
-            "no_repeat_ngram_size": max(0, int(self.infer_config.no_repeat_ngram_size)),
-            "repetition_penalty": float(self.infer_config.repetition_penalty),
-            "do_sample": float(self.infer_config.temperature) > 0.0,
-        }
-        if suppress_tokens:
-            gen_kwargs["suppress_tokens"] = suppress_tokens
-        if float(self.infer_config.temperature) > 0.0:
-            gen_kwargs["temperature"] = float(self.infer_config.temperature)
-        with torch.no_grad():
-            output_ids = self.model.generate(**gen_kwargs)
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        decoded = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
-        return {
-            "prediction": normalize_text(decoded),
-            "raw_output": decoded,
-            "latency_ms": round(latency_ms, 3),
-        }
+    def predict(
+        self,
+        image_path: Path,
+        *,
+        max_new_tokens: int | None = None,
+        num_beams: int | None = None,
+        temperature: float | None = None,
+        length_penalty: float | None = None,
+        no_repeat_ngram_size: int | None = None,
+        repetition_penalty: float | None = None,
+    ) -> Dict[str, Any]:
+        image = _preprocess_image(image_path, use_grayscale=bool(self.infer_config.use_grayscale))
+        result = _run_crop_first_ocr(
+            self.model,
+            self.processor,
+            image,
+            max_new_tokens=self.infer_config.max_new_tokens if max_new_tokens is None else int(max_new_tokens),
+            num_beams=self.infer_config.num_beams if num_beams is None else int(num_beams),
+            temperature=self.infer_config.temperature if temperature is None else float(temperature),
+            length_penalty=self.infer_config.length_penalty if length_penalty is None else float(length_penalty),
+            no_repeat_ngram_size=(
+                self.infer_config.no_repeat_ngram_size
+                if no_repeat_ngram_size is None
+                else int(no_repeat_ngram_size)
+            ),
+            repetition_penalty=(
+                self.infer_config.repetition_penalty
+                if repetition_penalty is None
+                else float(repetition_penalty)
+            ),
+        )
+        result["effective_image_size"] = int(self.effective_image_size)
+        return result
 
 
 def load_predictor(config: InferConfig) -> Predictor:
@@ -60,6 +90,7 @@ def load_predictor(config: InferConfig) -> Predictor:
 
     processor = TrOCRProcessor.from_pretrained(model_dir)
     model = VisionEncoderDecoderModel.from_pretrained(model_dir)
+    effective_image_size = _set_processor_resize(processor, config.image_size, model=model)
     tok = processor.tokenizer
     start_id = tok.bos_token_id if tok.bos_token_id is not None else tok.cls_token_id
     if start_id is None:
@@ -77,4 +108,9 @@ def load_predictor(config: InferConfig) -> Predictor:
         model.generation_config.repetition_penalty = float(config.repetition_penalty)
     model.to("cpu")
     model.eval()
-    return Predictor(model=model, processor=processor, infer_config=config)
+    return Predictor(
+        model=model,
+        processor=processor,
+        infer_config=config,
+        effective_image_size=int(effective_image_size),
+    )
