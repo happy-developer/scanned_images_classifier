@@ -13,7 +13,44 @@ class OCRRecord:
     ocr_text: str
 
 
-def load_ocr_csv(csv_path: Path, image_dir: Path) -> List[OCRRecord]:
+def _resolve_from_source_path(
+    source_path_value: str,
+    *,
+    csv_path: Path,
+    image_dir: Path,
+    data_root: Path | None,
+) -> Path | None:
+    raw_value = str(source_path_value or "").strip()
+    if not raw_value:
+        return None
+
+    source_path = Path(raw_value)
+    if source_path.is_absolute():
+        resolved = source_path.resolve()
+        return resolved if resolved.exists() else None
+
+    candidate_roots: list[Path] = []
+    if data_root is not None:
+        candidate_roots.append(data_root.resolve())
+    candidate_roots.append(csv_path.parent.resolve())
+
+    image_dir_resolved = image_dir.resolve()
+    candidate_roots.append(image_dir_resolved)
+    candidate_roots.extend(image_dir_resolved.parents)
+
+    seen_roots: set[str] = set()
+    for root in candidate_roots:
+        root_key = str(root).lower()
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        resolved = (root / source_path).resolve()
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def load_ocr_csv(csv_path: Path, image_dir: Path, *, data_root: Path | None = None) -> List[OCRRecord]:
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
     if not image_dir.exists():
@@ -29,11 +66,25 @@ def load_ocr_csv(csv_path: Path, image_dir: Path) -> List[OCRRecord]:
         for row in reader:
             img_name = str(row.get("File Name", "")).strip()
             text = str(row.get("OCRed Text", "")).strip()
-            if not img_name or not text:
+            if not text:
                 continue
-            image_path = (image_dir / img_name).resolve()
-            if not image_path.exists():
-                continue
+
+            source_image_path = _resolve_from_source_path(
+                str(row.get("source_path", "")),
+                csv_path=csv_path,
+                image_dir=image_dir,
+                data_root=data_root,
+            )
+            if source_image_path is not None:
+                image_path = source_image_path
+                if not img_name:
+                    img_name = image_path.name
+            else:
+                if not img_name:
+                    continue
+                image_path = (image_dir / img_name).resolve()
+                if not image_path.exists():
+                    continue
             records.append(OCRRecord(img_name=img_name, image_path=image_path, ocr_text=text))
 
     if not records:
@@ -52,7 +103,7 @@ def load_multi_ocr_sources(
     merged: List[OCRRecord] = []
     seen: set[str] = set()
     for csv_rel, image_rel in zip(csv_paths, image_subdirs):
-        records = load_ocr_csv(data_root / csv_rel, data_root / image_rel)
+        records = load_ocr_csv(data_root / csv_rel, data_root / image_rel, data_root=data_root)
         for rec in records:
             key = str(rec.image_path).lower()
             if key in seen:
@@ -95,7 +146,7 @@ def load_default_train_eval(
         csv_paths=train_csvs,
         image_subdirs=image_subdirs_train,
     )
-    eval_records = load_ocr_csv(data_root / eval_csv, data_root / image_subdir_eval)
+    eval_records = load_ocr_csv(data_root / eval_csv, data_root / image_subdir_eval, data_root=data_root)
     return train_records, eval_records
 
 

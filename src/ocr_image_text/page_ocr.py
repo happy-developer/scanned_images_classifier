@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import re
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
@@ -22,6 +24,9 @@ class SegmentationPlan:
     used_full_page_fallback: bool
     strategy: str
     fallback_reason: str | None = None
+    original_crop_count: int = 0
+    deduplicated_crop_count: int = 0
+    duplicate_crop_count: int = 0
 
 
 def _ensure_rgb(image: Image.Image, use_grayscale: bool) -> Image.Image:
@@ -104,6 +109,88 @@ def _box_area(box: Tuple[int, int, int, int]) -> int:
     return max(0, right - left) * max(0, bottom - top)
 
 
+
+def _box_intersection_area(
+    left_box: Tuple[int, int, int, int],
+    right_box: Tuple[int, int, int, int],
+) -> int:
+    left = max(left_box[0], right_box[0])
+    top = max(left_box[1], right_box[1])
+    right = min(left_box[2], right_box[2])
+    bottom = min(left_box[3], right_box[3])
+    return _box_area((left, top, right, bottom))
+
+
+def _boxes_too_similar(
+    left_box: Tuple[int, int, int, int],
+    right_box: Tuple[int, int, int, int],
+    *,
+    overlap_threshold: float = 0.95,
+    iou_threshold: float = 0.85,
+) -> bool:
+    left_area = _box_area(left_box)
+    right_area = _box_area(right_box)
+    if left_area <= 0 or right_area <= 0:
+        return False
+
+    intersection = _box_intersection_area(left_box, right_box)
+    if intersection <= 0:
+        return False
+
+    min_area = float(min(left_area, right_area))
+    union_area = float(left_area + right_area - intersection)
+    overlap_ratio = intersection / max(1.0, min_area)
+    iou = intersection / max(1.0, union_area)
+    return overlap_ratio >= overlap_threshold or iou >= iou_threshold
+
+
+def _dedupe_crop_regions(regions: Sequence[CropRegion]) -> Tuple[List[CropRegion], int]:
+    deduped: List[CropRegion] = []
+    skipped = 0
+    for region in regions:
+        if deduped and _boxes_too_similar(deduped[-1].box, region.box):
+            skipped += 1
+            continue
+        deduped.append(region)
+    return deduped, skipped
+
+
+def _text_similarity_key(text: str) -> str:
+    normalized = normalize_text(text).casefold()
+    return re.sub(r'[^0-9a-z]+', ' ', normalized).strip()
+
+
+def _is_near_duplicate_text(previous: str, current: str) -> bool:
+    previous_key = _text_similarity_key(previous)
+    current_key = _text_similarity_key(current)
+    if not previous_key or not current_key:
+        return False
+    if previous_key == current_key:
+        return True
+
+    previous_len = len(previous_key)
+    current_len = len(current_key)
+    if min(previous_len, current_len) < 12:
+        return False
+
+    ratio = SequenceMatcher(None, previous_key, current_key).ratio()
+    return ratio >= 0.96
+
+
+def _dedupe_neighboring_text_segments(segment_texts: Sequence[str]) -> Tuple[List[str], int]:
+    deduped: List[str] = []
+    skipped = 0
+    for text in segment_texts:
+        normalized = normalize_text(text)
+        if not normalized:
+            continue
+        if deduped and _is_near_duplicate_text(deduped[-1], normalized):
+            skipped += 1
+            continue
+        deduped.append(normalized)
+    return deduped, skipped
+
+
 def _full_page_plan(page_size: Tuple[int, int], reason: str) -> SegmentationPlan:
     width, height = page_size
     return SegmentationPlan(
@@ -111,16 +198,35 @@ def _full_page_plan(page_size: Tuple[int, int], reason: str) -> SegmentationPlan
         used_full_page_fallback=True,
         strategy="full_page_fallback",
         fallback_reason=reason,
+        original_crop_count=1,
+        deduplicated_crop_count=1,
+        duplicate_crop_count=0,
     )
 
 
 def segment_page(
     image: Image.Image,
     *,
+    segmentation_mode: str = "line_only",
     max_regions: int = 64,
 ) -> SegmentationPlan:
     rgb = image.convert("RGB")
     width, height = rgb.size
+    mode = str(segmentation_mode or "line_only").strip().lower()
+    if mode not in {"line_only", "line_block", "full_page"}:
+        mode = "line_only"
+
+    if mode == "full_page":
+        return SegmentationPlan(
+            crop_regions=[CropRegion(box=(0, 0, width, height), label="full_page")],
+            used_full_page_fallback=False,
+            strategy="full_page",
+            fallback_reason=None,
+            original_crop_count=1,
+            deduplicated_crop_count=1,
+            duplicate_crop_count=0,
+        )
+
     if width <= 1 or height <= 1:
         return _full_page_plan((width, height), "image_too_small")
 
@@ -155,36 +261,71 @@ def segment_page(
     for y0, y1 in row_spans:
         band = mask[y0 : y1 + 1, :]
         band_height = max(1, y1 - y0 + 1)
-        col_scores = band.sum(axis=0)
-        col_threshold = max(2, int(band_height * 0.01))
-        col_spans = _merge_spans(_find_spans(col_scores, col_threshold), max_gap=max(3, width // 100))
-        if not col_spans:
-            col_spans = [(0, width - 1)]
+        if mode == "line_only":
+            box = _expand_box(0, y0, width, y1 + 1, width, height, pad_x=pad_x, pad_y=pad_y)
+            if _box_area(box) >= area_floor:
+                crop_regions.append(CropRegion(box=box, label="line"))
+        else:
+            col_scores = band.sum(axis=0)
+            col_threshold = max(2, int(band_height * 0.01))
+            col_spans = _merge_spans(_find_spans(col_scores, col_threshold), max_gap=max(3, width // 100))
+            if not col_spans:
+                col_spans = [(0, width - 1)]
 
-        for x0, x1 in col_spans:
-            box = _expand_box(x0, y0, x1 + 1, y1 + 1, width, height, pad_x=pad_x, pad_y=pad_y)
-            if _box_area(box) < area_floor:
-                continue
-            crop_regions.append(CropRegion(box=box, label="block" if len(col_spans) > 1 else "line"))
-            if len(crop_regions) >= max_regions:
-                break
+            for x0, x1 in col_spans:
+                box = _expand_box(x0, y0, x1 + 1, y1 + 1, width, height, pad_x=pad_x, pad_y=pad_y)
+                if _box_area(box) < area_floor:
+                    continue
+                crop_regions.append(CropRegion(box=box, label="block" if len(col_spans) > 1 else "line"))
+                if len(crop_regions) >= max_regions:
+                    break
         if len(crop_regions) >= max_regions:
             break
 
     if not crop_regions:
         return _full_page_plan((width, height), "no_usable_crops")
 
-    total_crop_area = sum(_box_area(region.box) for region in crop_regions)
+    original_crop_count = len(crop_regions)
+    deduplicated_crop_regions, duplicate_crop_count = _dedupe_crop_regions(crop_regions)
+    if not deduplicated_crop_regions:
+        return _full_page_plan((width, height), "no_usable_crops")
+
+    total_crop_area = sum(_box_area(region.box) for region in deduplicated_crop_regions)
     page_area = width * height
     if total_crop_area <= 0 or total_crop_area / max(1, page_area) < 0.01:
         return _full_page_plan((width, height), "crop_coverage_too_small")
 
     return SegmentationPlan(
-        crop_regions=crop_regions,
+        crop_regions=deduplicated_crop_regions,
         used_full_page_fallback=False,
-        strategy="line_block_crops",
+        strategy="line_only_crops" if mode == "line_only" else "line_block_crops",
         fallback_reason=None,
+        original_crop_count=original_crop_count,
+        deduplicated_crop_count=len(deduplicated_crop_regions),
+        duplicate_crop_count=duplicate_crop_count,
     )
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    max_chars = max(0, int(max_chars))
+    if max_chars <= 0:
+        return ""
+    normalized = normalize_text(text)
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip()
+
+
+def _count_invoice_markers(text: str) -> int:
+    normalized = normalize_text(text).casefold()
+    if not normalized:
+        return 0
+
+    patterns = (
+        r"\binvoice(?:\s*(?:no\.?|number|n[o#]|date|id))?\b",
+        r"\bfacture(?:\s*(?:no\.?|number|n[o#]|date|id))?\b",
+    )
+    return sum(len(list(re.finditer(pattern, normalized))) for pattern in patterns)
 
 
 def _build_generation_kwargs(
@@ -252,17 +393,22 @@ def _run_crop_first_ocr(
     processor: Any,
     image: Image.Image,
     *,
+    segmentation_mode: str = "line_only",
     max_new_tokens: int,
     num_beams: int,
     temperature: float,
     length_penalty: float,
     no_repeat_ngram_size: int,
     repetition_penalty: float,
+    max_chars_per_segment: int = 320,
+    max_total_chars: int = 2400,
+    max_invoice_markers_per_page: int = 2,
+    hard_truncate_segment_text: bool = True,
     batch_size: int = 4,
 ) -> Dict[str, Any]:
     t0 = time.perf_counter()
     page_image = image.convert("RGB")
-    plan = segment_page(page_image)
+    plan = segment_page(page_image, segmentation_mode=segmentation_mode)
 
     def _ocr_segments(regions: Sequence[CropRegion]) -> List[str]:
         generation_kwargs = _build_generation_kwargs(
@@ -288,24 +434,121 @@ def _run_crop_first_ocr(
             )
         return decoded_segments
 
+    def _extract_output(
+        active_plan: SegmentationPlan,
+    ) -> tuple[List[str], List[str], int, str, str, int, int, int, bool]:
+        segment_texts = _ocr_segments(active_plan.crop_regions)
+        deduped_segment_texts, duplicate_segment_count = _dedupe_neighboring_text_segments(segment_texts)
+
+        cleaned_segment_texts: List[str] = []
+        segment_truncation_blocked = False
+        segment_truncation_count = 0
+        for text in deduped_segment_texts:
+            normalized_text = normalize_text(text)
+            if not normalized_text:
+                continue
+            if len(normalized_text) > max_chars_per_segment:
+                if hard_truncate_segment_text:
+                    normalized_text = _truncate_text(normalized_text, max_chars_per_segment)
+                    segment_truncation_count += 1
+                else:
+                    segment_truncation_blocked = True
+            cleaned_segment_texts.append(normalized_text)
+
+        raw_output = "\n".join(cleaned_segment_texts).strip()
+        normalized_output = normalize_text(raw_output)
+        total_chars = len(normalized_output)
+        marker_count = _count_invoice_markers(normalized_output)
+        needs_full_page_retry = (
+            not active_plan.used_full_page_fallback
+            and active_plan.strategy != "full_page"
+            and (
+                segment_truncation_blocked
+                or total_chars > max_total_chars
+                or marker_count > max_invoice_markers_per_page
+            )
+        )
+        return (
+            segment_texts,
+            deduped_segment_texts,
+            duplicate_segment_count,
+            raw_output,
+            normalized_output,
+            segment_truncation_count,
+            total_chars,
+            marker_count,
+            needs_full_page_retry,
+        )
+
+    fallback_reason = None
     try:
-        segment_texts = _ocr_segments(plan.crop_regions)
-        raw_output = "\n".join(text for text in segment_texts if text).strip()
+        for _ in range(2):
+            (
+                segment_texts,
+                deduped_segment_texts,
+                duplicate_segment_count,
+                raw_output,
+                normalized_output,
+                segment_truncation_count,
+                total_chars,
+                marker_count,
+                needs_full_page_retry,
+            ) = _extract_output(plan)
+            if needs_full_page_retry:
+                if total_chars > max_total_chars:
+                    fallback_reason = "max_total_chars_exceeded"
+                elif marker_count > max_invoice_markers_per_page:
+                    fallback_reason = "max_invoice_markers_per_page_exceeded"
+                else:
+                    fallback_reason = "segment_too_long"
+                plan = _full_page_plan(page_image.size, fallback_reason)
+                continue
+
+            if total_chars > max_total_chars:
+                normalized_output = _truncate_text(normalized_output, max_total_chars)
+                raw_output = normalized_output
+                total_chars = len(normalized_output)
+            break
+        else:  # pragma: no cover - defensive safeguard
+            raise RuntimeError("OCR guardrails failed to converge")
     except Exception as exc:
         if plan.used_full_page_fallback:
             raise
-        fallback_plan = _full_page_plan(page_image.size, f"crop_ocr_failed: {exc}")
-        segment_texts = _ocr_segments(fallback_plan.crop_regions)
-        raw_output = "\n".join(text for text in segment_texts if text).strip()
-        plan = fallback_plan
-    else:
-        if not normalize_text(raw_output) and not plan.used_full_page_fallback:
-            fallback_plan = _full_page_plan(page_image.size, "empty_crop_output")
-            segment_texts = _ocr_segments(fallback_plan.crop_regions)
-            raw_output = "\n".join(text for text in segment_texts if text).strip()
-            plan = fallback_plan
+        fallback_reason = f"crop_ocr_failed: {exc}"
+        plan = _full_page_plan(page_image.size, fallback_reason)
+        (
+            segment_texts,
+            deduped_segment_texts,
+            duplicate_segment_count,
+            raw_output,
+            normalized_output,
+            segment_truncation_count,
+            total_chars,
+            marker_count,
+            _needs_full_page_retry,
+        ) = _extract_output(plan)
+        if total_chars > max_total_chars:
+            normalized_output = _truncate_text(normalized_output, max_total_chars)
+            raw_output = normalized_output
 
-    normalized_output = normalize_text(raw_output)
+    if not normalize_text(raw_output) and not plan.used_full_page_fallback:
+        fallback_reason = "empty_crop_output"
+        plan = _full_page_plan(page_image.size, fallback_reason)
+        (
+            segment_texts,
+            deduped_segment_texts,
+            duplicate_segment_count,
+            raw_output,
+            normalized_output,
+            segment_truncation_count,
+            total_chars,
+            marker_count,
+            _needs_full_page_retry,
+        ) = _extract_output(plan)
+        if total_chars > max_total_chars:
+            normalized_output = _truncate_text(normalized_output, max_total_chars)
+            raw_output = normalized_output
+
     latency_ms = (time.perf_counter() - t0) * 1000.0
     return {
         "prediction": normalized_output,
@@ -317,6 +560,17 @@ def _run_crop_first_ocr(
         "used_full_page_fallback": bool(plan.used_full_page_fallback),
         "fallback_reason": plan.fallback_reason,
         "crop_count": len(plan.crop_regions),
+        "original_crop_count": int(getattr(plan, "original_crop_count", len(plan.crop_regions))),
+        "deduplicated_crop_count": int(getattr(plan, "deduplicated_crop_count", len(plan.crop_regions))),
+        "duplicate_crop_count": int(getattr(plan, "duplicate_crop_count", 0)),
+        "segment_count": len(segment_texts),
+        "deduplicated_segment_count": len(deduped_segment_texts),
+        "duplicate_segment_count": int(duplicate_segment_count),
+        "segment_truncation_count": int(segment_truncation_count),
+        "max_chars_per_segment": int(max_chars_per_segment),
+        "max_total_chars": int(max_total_chars),
+        "max_invoice_markers_per_page": int(max_invoice_markers_per_page),
+        "hard_truncate_segment_text": bool(hard_truncate_segment_text),
     }
 
 

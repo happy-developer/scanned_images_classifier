@@ -33,7 +33,7 @@ class TrainConfig:
     image_size: int = 768
     use_grayscale: bool = True
     learning_rate: float = 3e-5
-    train_epochs: int = 10
+    train_epochs: int = 2
     per_device_train_batch_size: int = 2
     per_device_eval_batch_size: int = 2
     random_seed: int = 3407
@@ -42,6 +42,9 @@ class TrainConfig:
     early_stopping_threshold: float = 0.0
     metric_for_best_model: str = "eval_cer"
     greater_is_better: bool = False
+    allow_long_training: bool = False
+    require_supervised_eval: bool = True
+    allow_unlabeled_eval: bool = False
     generation_num_beams: int = 4
     generation_length_penalty: float = 1.0
     generation_no_repeat_ngram_size: int = 4
@@ -53,9 +56,14 @@ class InferConfig:
     artifacts_dir: Path
     image_size: int = 768
     use_grayscale: bool = True
-    max_new_tokens: int = 192
-    num_beams: int = 4
+    max_new_tokens: int = 96
+    num_beams: int = 1
     temperature: float = 0.0
     length_penalty: float = 1.0
-    no_repeat_ngram_size: int = 4
-    repetition_penalty: float = 1.15
+    no_repeat_ngram_size: int = 6
+    repetition_penalty: float = 1.2
+    segmentation_mode: str = "line_only"
+    max_chars_per_segment: int = 320
+    max_total_chars: int = 2400
+    max_invoice_markers_per_page: int = 2
+    hard_truncate_segment_text: bool = True

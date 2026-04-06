@@ -9,12 +9,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+BATCH1_TEST_SPLIT_REL = "outputs/batch1_test_split.csv"
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate OCR model (supervised if CSV exists, else unlabeled batch_2 validation).")
+    parser = argparse.ArgumentParser(
+        description="Evaluate OCR model on supervised labels when available; unlabeled mode is explicit and not quality validation."
+    )
     parser.add_argument("--data-root", type=str, default="")
+    parser.add_argument(
+        "--use-batch1-split",
+        action="store_true",
+        help="Use outputs/batch1_test_split.csv with image subdir set to '.' for supervised evaluation.",
+    )
     parser.add_argument("--artifacts-dir", type=str, default="notebooks/artifacts/doc_understanding_ocr_cpu")
-
     parser.add_argument("--eval-csv", type=str, default="")
     parser.add_argument("--image-subdir-eval", type=str, default="batch_2/batch_2/batch2_1")
     parser.add_argument(
@@ -23,14 +31,25 @@ def parse_args() -> argparse.Namespace:
         default="batch_2/batch_2/batch2_1,batch_2/batch_2/batch2_2,batch_2/batch_2/batch2_3",
         help="Comma-separated unlabeled validation image folders",
     )
-
+    parser.add_argument(
+        "--require-supervised-eval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require a labeled eval CSV; use --allow-unlabeled-eval to bypass this guard.",
+    )
+    parser.add_argument(
+        "--allow-unlabeled-eval",
+        action="store_true",
+        help="Allow unlabeled inference-only evaluation when no labeled CSV is available.",
+    )
     parser.add_argument("--max-samples", type=int, default=100)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
-    parser.add_argument("--num-beams", type=int, default=4)
+    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=4)
-    parser.add_argument("--repetition-penalty", type=float, default=1.15)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=6)
+    parser.add_argument("--repetition-penalty", type=float, default=1.2)
     parser.add_argument("--no-wer", action="store_true", help="Skip WER computation in supervised evaluation")
     return parser.parse_args()
 
@@ -46,21 +65,23 @@ def main() -> None:
     artifacts_dir = Path(args.artifacts_dir).resolve()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    predictor = load_predictor(
-        InferConfig(
-            artifacts_dir=artifacts_dir,
-            image_size=args.image_size,
-            use_grayscale=not args.no_grayscale,
-            num_beams=args.num_beams,
-            length_penalty=args.length_penalty,
-            no_repeat_ngram_size=args.no_repeat_ngram_size,
-            repetition_penalty=args.repetition_penalty,
-        )
-    )
+    eval_csv_arg = args.eval_csv
+    image_subdir_eval_arg = args.image_subdir_eval
+    if args.use_batch1_split:
+        split_test_path = (data_root / BATCH1_TEST_SPLIT_REL).resolve()
+        if not split_test_path.exists():
+            raise FileNotFoundError(
+                "Batch1 split mode enabled but split CSV file is missing: "
+                + str(split_test_path)
+                + ". Expected file: outputs/batch1_test_split.csv under --data-root."
+            )
+        eval_csv_arg = BATCH1_TEST_SPLIT_REL
+        image_subdir_eval_arg = "."
 
     payload: dict = {
-        "schema_version": "ocr_image_eval.v2",
+        "schema_version": "ocr_image_eval.v3",
         "decode": {
+            "max_new_tokens": args.max_new_tokens,
             "num_beams": args.num_beams,
             "length_penalty": args.length_penalty,
             "no_repeat_ngram_size": args.no_repeat_ngram_size,
@@ -68,14 +89,27 @@ def main() -> None:
         },
         "image_size": args.image_size,
         "use_grayscale": not args.no_grayscale,
-        "compute_wer": not args.no_wer,
+        "quality_validation": False,
     }
     effective_size: int | None = None
 
-    eval_csv_path = (data_root / args.eval_csv) if args.eval_csv else None
-    eval_img_dir = data_root / args.image_subdir_eval
+    can_fallback_to_unlabeled = bool(args.allow_unlabeled_eval) or not bool(args.require_supervised_eval)
+    eval_csv_path = (data_root / eval_csv_arg) if eval_csv_arg else None
+    eval_img_dir = data_root / image_subdir_eval_arg
 
-    if eval_csv_path and eval_csv_path.exists() and eval_img_dir.exists():
+    if eval_csv_arg and eval_csv_path and eval_csv_path.exists() and eval_img_dir.exists():
+        predictor = load_predictor(
+            InferConfig(
+                artifacts_dir=artifacts_dir,
+                image_size=args.image_size,
+                use_grayscale=not args.no_grayscale,
+                max_new_tokens=args.max_new_tokens,
+                num_beams=args.num_beams,
+                length_penalty=args.length_penalty,
+                no_repeat_ngram_size=args.no_repeat_ngram_size,
+                repetition_penalty=args.repetition_penalty,
+            )
+        )
         records = load_ocr_csv(eval_csv_path, eval_img_dir)
         if args.max_samples > 0:
             records = records[: args.max_samples]
@@ -87,10 +121,37 @@ def main() -> None:
                 effective_size = int(output.get("effective_image_size", args.image_size))
             preds[rec.img_name] = str(output.get("prediction", ""))
 
-        payload["mode"] = "supervised"
+        payload["mode"] = "supervised_validation"
+        payload["quality_validation"] = True
         payload["metrics"] = evaluate_records(records, preds, compute_wer=not args.no_wer)
         payload["num_samples"] = len(records)
     else:
+        if not can_fallback_to_unlabeled:
+            missing = []
+            if not eval_csv_arg:
+                missing.append("--eval-csv not provided")
+            elif not eval_csv_path or not eval_csv_path.exists():
+                missing.append(f"eval CSV not found: {eval_csv_path}")
+            if eval_csv_arg and not eval_img_dir.exists():
+                missing.append(f"image directory not found: {eval_img_dir}")
+            raise FileNotFoundError(
+                "Supervised evaluation is required but unavailable. "
+                + "; ".join(missing)
+                + ". Pass --allow-unlabeled-eval only if you intentionally want prediction-only output."
+            )
+
+        predictor = load_predictor(
+            InferConfig(
+                artifacts_dir=artifacts_dir,
+                image_size=args.image_size,
+                use_grayscale=not args.no_grayscale,
+                max_new_tokens=args.max_new_tokens,
+                num_beams=args.num_beams,
+                length_penalty=args.length_penalty,
+                no_repeat_ngram_size=args.no_repeat_ngram_size,
+                repetition_penalty=args.repetition_penalty,
+            )
+        )
         subdirs = tuple(s.strip() for s in args.eval_image_subdirs.split(",") if s.strip())
         image_paths = load_images_from_subdirs(data_root, subdirs)
         if args.max_samples > 0:
@@ -117,9 +178,25 @@ def main() -> None:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
         n = len(rows)
-        payload["mode"] = "unlabeled_batch2_validation"
+        summary = summarize_predictions(r["prediction"] for r in rows)
+        print(
+            "WARNING: unlabeled evaluation mode is inference-only; it does not measure quality.",
+            file=sys.stderr,
+        )
+        payload["mode"] = "unlabeled_inference_only"
+        payload["quality_validation"] = False
+        payload["warning"] = {
+            "severity": "high",
+            "code": "UNLABELED_EVAL_MODE",
+            "message": (
+                "This run has no supervised labels. The output contains prediction summaries and latency only, "
+                "so it must not be interpreted as a quality validation."
+            ),
+        }
+        payload["metrics_kind"] = "prediction_summary"
+        payload["prediction_summary"] = summary
+        payload["metrics"] = summary
         payload["num_samples"] = n
-        payload["metrics"] = summarize_predictions(r["prediction"] for r in rows)
         payload["avg_latency_ms"] = (lat_sum / n) if n else 0.0
         payload["predictions_path"] = str(pred_path)
         payload["sample_predictions"] = rows[:5]

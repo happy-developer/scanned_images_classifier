@@ -210,3 +210,5 @@ __marimo__/
 notebooks/data/
 data/scanned_images
 artifacts/
+outputs/
+tmp/

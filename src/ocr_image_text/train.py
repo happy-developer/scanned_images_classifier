@@ -61,6 +61,36 @@ def _preprocess_image(image_path: Path, use_grayscale: bool) -> Image.Image:
     return image
 
 
+def _resolve_eval_records(config: TrainConfig) -> tuple[list[OCRRecord], bool, str]:
+    can_fallback_to_unlabeled = bool(config.allow_unlabeled_eval) or not bool(config.require_supervised_eval)
+    if not config.eval_csv:
+        if can_fallback_to_unlabeled:
+            return [], False, "unlabeled"
+        raise FileNotFoundError(
+            "Supervised evaluation is required but --eval-csv was not provided. "
+            "Provide a real labeled eval CSV or pass --allow-unlabeled-eval explicitly."
+        )
+
+    eval_csv_path = config.data_root / config.eval_csv
+    eval_img_dir = config.data_root / config.image_subdir_eval
+    if not eval_csv_path.exists() or not eval_img_dir.exists():
+        if can_fallback_to_unlabeled:
+            return [], False, "unlabeled"
+        missing_parts = []
+        if not eval_csv_path.exists():
+            missing_parts.append(f"CSV missing: {eval_csv_path}")
+        if not eval_img_dir.exists():
+            missing_parts.append(f"image dir missing: {eval_img_dir}")
+        raise FileNotFoundError(
+            "Supervised evaluation is required but the validation set is incomplete. "
+            + "; ".join(missing_parts)
+            + ". Provide a real labeled eval CSV or pass --allow-unlabeled-eval explicitly."
+        )
+
+    eval_records = load_ocr_csv(eval_csv_path, eval_img_dir)
+    return eval_records, True, "supervised"
+
+
 class OCRTrainingPlotCallback(TrainerCallback):
     def __init__(self, output_dir: Path) -> None:
         self.output_dir = output_dir
@@ -291,20 +321,18 @@ def _compute_cer_metrics(eval_preds, tokenizer) -> Dict[str, float]:
 
 def run_training(config: TrainConfig) -> Dict[str, Any]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    if int(config.train_epochs) > 3 and not bool(config.allow_long_training):
+        raise ValueError(
+            "Refusing to start a long training run with epochs > 3. "
+            "Pass --allow-long-training explicitly if this is intentional."
+        )
 
+    eval_records, supervised_eval_enabled, eval_mode = _resolve_eval_records(config)
     train_records = load_multi_ocr_sources(
         data_root=config.data_root,
         csv_paths=config.train_csvs,
         image_subdirs=config.image_subdirs_train,
     )
-    eval_records: List[OCRRecord] = []
-    supervised_eval_enabled = False
-    if config.eval_csv:
-        eval_csv_path = config.data_root / config.eval_csv
-        eval_img_dir = config.data_root / config.image_subdir_eval
-        if eval_csv_path.exists() and eval_img_dir.exists():
-            eval_records = load_ocr_csv(eval_csv_path, eval_img_dir)
-            supervised_eval_enabled = len(eval_records) > 0
     if config.max_train_samples > 0:
         train_records = train_records[: config.max_train_samples]
     if supervised_eval_enabled and config.max_eval_samples > 0:
@@ -414,6 +442,7 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
         "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(config).items()},
         "effective_image_size": int(effective_image_size),
         "supervised_eval_enabled": supervised_eval_enabled,
+        "eval_mode": eval_mode,
         "checkpoint_selection": selected_checkpoint_info,
         "num_train_records": len(train_records),
         "num_eval_records": len(eval_records),
@@ -424,3 +453,4 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
     }
     _write_json(config.output_dir / "train_summary.json", summary)
     return summary
+

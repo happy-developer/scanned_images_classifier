@@ -52,18 +52,24 @@ class Predictor:
         self,
         image_path: Path,
         *,
+        segmentation_mode: str | None = None,
         max_new_tokens: int | None = None,
         num_beams: int | None = None,
         temperature: float | None = None,
         length_penalty: float | None = None,
         no_repeat_ngram_size: int | None = None,
         repetition_penalty: float | None = None,
+        max_chars_per_segment: int | None = None,
+        max_total_chars: int | None = None,
+        max_invoice_markers_per_page: int | None = None,
+        hard_truncate_segment_text: bool | None = None,
     ) -> Dict[str, Any]:
         image = _preprocess_image(image_path, use_grayscale=bool(self.infer_config.use_grayscale))
         result = _run_crop_first_ocr(
             self.model,
             self.processor,
             image,
+            segmentation_mode=self.infer_config.segmentation_mode if segmentation_mode is None else str(segmentation_mode),
             max_new_tokens=self.infer_config.max_new_tokens if max_new_tokens is None else int(max_new_tokens),
             num_beams=self.infer_config.num_beams if num_beams is None else int(num_beams),
             temperature=self.infer_config.temperature if temperature is None else float(temperature),
@@ -77,6 +83,24 @@ class Predictor:
                 self.infer_config.repetition_penalty
                 if repetition_penalty is None
                 else float(repetition_penalty)
+            ),
+            max_chars_per_segment=(
+                self.infer_config.max_chars_per_segment
+                if max_chars_per_segment is None
+                else int(max_chars_per_segment)
+            ),
+            max_total_chars=(
+                self.infer_config.max_total_chars if max_total_chars is None else int(max_total_chars)
+            ),
+            max_invoice_markers_per_page=(
+                self.infer_config.max_invoice_markers_per_page
+                if max_invoice_markers_per_page is None
+                else int(max_invoice_markers_per_page)
+            ),
+            hard_truncate_segment_text=(
+                self.infer_config.hard_truncate_segment_text
+                if hard_truncate_segment_text is None
+                else bool(hard_truncate_segment_text)
             ),
         )
         result["effective_image_size"] = int(self.effective_image_size)
@@ -104,8 +128,8 @@ def load_predictor(config: InferConfig) -> Predictor:
         model.generation_config.pad_token_id = tok.pad_token_id
         model.generation_config.num_beams = max(1, int(config.num_beams))
         model.generation_config.length_penalty = float(config.length_penalty)
-        model.generation_config.no_repeat_ngram_size = max(0, int(config.no_repeat_ngram_size))
-        model.generation_config.repetition_penalty = float(config.repetition_penalty)
+        model.generation_config.no_repeat_ngram_size = max(6, int(config.no_repeat_ngram_size))
+        model.generation_config.repetition_penalty = max(1.2, float(config.repetition_penalty))
     model.to("cpu")
     model.eval()
     return Predictor(

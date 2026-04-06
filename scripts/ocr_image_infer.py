@@ -17,12 +17,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", type=str, required=True)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
-    parser.add_argument("--max-new-tokens", type=int, default=192)
-    parser.add_argument("--num-beams", type=int, default=4)
+    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=4)
-    parser.add_argument("--repetition-penalty", type=float, default=1.15)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=6)
+    parser.add_argument("--repetition-penalty", type=float, default=1.2)
+    parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
+    parser.add_argument("--max-chars-per-segment", type=int, default=320)
+    parser.add_argument("--max-total-chars", type=int, default=2400)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument(
+        "--hard-truncate-segment-text",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Truncate overlong segment text before joining (use --no-hard-truncate-segment-text to disable)",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +63,11 @@ def main() -> None:
         length_penalty=args.length_penalty,
         no_repeat_ngram_size=args.no_repeat_ngram_size,
         repetition_penalty=args.repetition_penalty,
+        segmentation_mode=args.segmentation_mode,
+        max_chars_per_segment=args.max_chars_per_segment,
+        max_total_chars=args.max_total_chars,
+        max_invoice_markers_per_page=args.max_invoice_markers_per_page,
+        hard_truncate_segment_text=args.hard_truncate_segment_text,
     )
     predictor = load_predictor(cfg)
     image_path = _resolve_image(args.image, data_root)
