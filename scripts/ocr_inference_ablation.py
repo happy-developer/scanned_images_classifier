@@ -239,13 +239,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-beams-values",
         type=str,
-        default="1,4",
+        default="1,2",
         help="Comma-separated values for num_beams.",
     )
     parser.add_argument(
         "--segmentation-modes",
         type=str,
-        default="line_only,full_page",
+        default="line_only",
         help="Comma-separated segmentation modes: auto, line_only, line_block, full_page.",
     )
     parser.add_argument(
@@ -420,11 +420,11 @@ def main() -> None:
                 artifacts_dir=artifacts_dir,
                 image_size=args.image_size,
                 use_grayscale=True,
-                max_new_tokens=96,
-                num_beams=4,
+                max_new_tokens=80,
+                num_beams=1,
                 temperature=0.0,
                 length_penalty=1.0,
-                no_repeat_ngram_size=6,
+                no_repeat_ngram_size=5,
                 repetition_penalty=1.2,
             )
         )

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
@@ -127,7 +127,7 @@ class OCRPageDeduplicationTest(unittest.TestCase):
         self.assertEqual(result['segment_truncation_count'], 1)
         self.assertFalse(result['used_full_page_fallback'])
 
-    def test_run_crop_first_ocr_caps_total_chars_with_full_page_fallback(self) -> None:
+    def test_run_crop_first_ocr_caps_total_chars_without_forcing_full_page_fallback(self) -> None:
         image = Image.new('RGB', (256, 128), 'white')
         plan = SegmentationPlan(
             crop_regions=[
@@ -140,7 +140,7 @@ class OCRPageDeduplicationTest(unittest.TestCase):
             deduplicated_crop_count=1,
             duplicate_crop_count=0,
         )
-        processor = _FakeProcessor([['ABCDEFGHIJ'], ['KLMNOPQRST']])
+        processor = _FakeProcessor([['ABCDEFGHIJ']])
 
         with patch('src.ocr_image_text.page_ocr.segment_page', return_value=plan):
             result = _run_crop_first_ocr(
@@ -161,11 +161,46 @@ class OCRPageDeduplicationTest(unittest.TestCase):
                 batch_size=4,
             )
 
-        self.assertEqual(result['segmentation_strategy'], 'full_page_fallback')
-        self.assertTrue(result['used_full_page_fallback'])
-        self.assertEqual(result['fallback_reason'], 'max_total_chars_exceeded')
-        self.assertEqual(result['prediction'], 'KLMNO')
+        self.assertEqual(result['segmentation_strategy'], 'line_only_crops')
+        self.assertFalse(result['used_full_page_fallback'])
+        self.assertIsNone(result['fallback_reason'])
+        self.assertEqual(result['prediction'], 'ABCDE')
         self.assertLessEqual(len(result['prediction']), 5)
+        self.assertTrue(result['guardrail_char_cap_applied'])
+
+    def test_run_crop_first_ocr_caps_invoice_markers_without_fallback(self) -> None:
+        image = Image.new('RGB', (256, 128), 'white')
+        plan = SegmentationPlan(
+            crop_regions=[CropRegion(box=(0, 0, 256, 128), label='line')],
+            used_full_page_fallback=False,
+            strategy='line_only_crops',
+            fallback_reason=None,
+            original_crop_count=1,
+            deduplicated_crop_count=1,
+            duplicate_crop_count=0,
+        )
+        processor = _FakeProcessor([
+            ['Invoice No: 1 Invoice No: 2 Invoice No: 3 Invoice No: 4 details']
+        ])
+
+        with patch('src.ocr_image_text.page_ocr.segment_page', return_value=plan):
+            result = _run_crop_first_ocr(
+                _FakeModel(),
+                processor,
+                image,
+                max_new_tokens=16,
+                num_beams=1,
+                temperature=0.0,
+                length_penalty=1.0,
+                no_repeat_ngram_size=0,
+                repetition_penalty=1.0,
+                max_invoice_markers_per_page=2,
+                batch_size=4,
+            )
+
+        self.assertFalse(result['used_full_page_fallback'])
+        self.assertTrue(result['guardrail_marker_cap_applied'])
+        self.assertLessEqual(result['invoice_marker_count'], 2)
 
     def test_run_crop_first_ocr_reports_dedup_metrics(self) -> None:
         image = Image.new('RGB', (256, 128), 'white')

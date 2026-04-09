@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-subdir-eval", type=str, default="batch_2/batch_2/batch2_1")
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--max-eval-samples", type=int, default=0)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
         "--require-supervised-eval",
         action=argparse.BooleanOptionalAction,
@@ -57,17 +57,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-long-training",
         action="store_true",
-        help="Allow epochs greater than 3.",
+        help="Kept for backward compatibility. Training is hard-limited to 10 epochs.",
     )
     parser.add_argument("--train-batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
-    parser.add_argument("--num-beams", type=int, default=4)
+    parser.add_argument("--num-beams", type=int, default=2)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=4)
-    parser.add_argument("--repetition-penalty", type=float, default=1.15)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=5)
+    parser.add_argument("--repetition-penalty", type=float, default=1.2)
     return parser.parse_args()
 
 

@@ -128,8 +128,8 @@ def load_predictor(config: InferConfig) -> Predictor:
         model.generation_config.pad_token_id = tok.pad_token_id
         model.generation_config.num_beams = max(1, int(config.num_beams))
         model.generation_config.length_penalty = float(config.length_penalty)
-        model.generation_config.no_repeat_ngram_size = max(6, int(config.no_repeat_ngram_size))
-        model.generation_config.repetition_penalty = max(1.2, float(config.repetition_penalty))
+        model.generation_config.no_repeat_ngram_size = max(0, int(config.no_repeat_ngram_size))
+        model.generation_config.repetition_penalty = max(1.0, float(config.repetition_penalty))
     model.to("cpu")
     model.eval()
     return Predictor(

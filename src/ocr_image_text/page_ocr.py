@@ -328,6 +328,96 @@ def _count_invoice_markers(text: str) -> int:
     return sum(len(list(re.finditer(pattern, normalized))) for pattern in patterns)
 
 
+def _collapse_repeated_tokens(text: str, *, max_consecutive: int = 2) -> str:
+    lines = [line.strip() for line in normalize_text(text).split("\n") if line.strip()]
+    if not lines:
+        return ""
+
+    compact_lines: List[str] = []
+    for line in lines:
+        tokens = line.split()
+        if not tokens:
+            continue
+        out: List[str] = []
+        previous = ""
+        streak = 0
+        for token in tokens:
+            key = token.casefold()
+            if key == previous:
+                streak += 1
+            else:
+                previous = key
+                streak = 1
+            if streak <= max(1, int(max_consecutive)):
+                out.append(token)
+        if out:
+            compact_lines.append(" ".join(out).strip())
+
+    return "\n".join(compact_lines).strip()
+
+
+def _collapse_repeated_ngrams(text: str) -> str:
+    # Collapse repeated short phrase loops that often appear in OCR hallucinations.
+    normalized = normalize_text(text)
+    if not normalized:
+        return ""
+
+    cleaned = normalized
+    for ngram_len in (6, 5, 4, 3, 2):
+        # Example matched sequence: "a b c a b c a b c" -> "a b c"
+        pattern = re.compile(
+            rf"(?i)\b((?:\w+\s+){{{ngram_len - 1}}}\w+)(?:\s+\1)+\b"
+        )
+        cleaned = pattern.sub(r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _dedupe_lines_global(text: str) -> str:
+    lines = [line.strip() for line in normalize_text(text).split("\n") if line.strip()]
+    if not lines:
+        return ""
+
+    deduped: List[str] = []
+    seen_keys: set[str] = set()
+    for line in lines:
+        key = _text_similarity_key(line)
+        if not key:
+            continue
+        if key in seen_keys:
+            continue
+        if deduped and _is_near_duplicate_text(deduped[-1], line):
+            continue
+        deduped.append(line)
+        seen_keys.add(key)
+    return "\n".join(deduped).strip()
+
+
+def _limit_invoice_sections(text: str, max_invoice_markers: int) -> str:
+    marker_limit = max(1, int(max_invoice_markers))
+    normalized = normalize_text(text)
+    if not normalized:
+        return ""
+
+    marker_pattern = re.compile(
+        r"(?i)\b(?:invoice(?:\s*(?:no\.?|number|n[o#]|date|id))?|facture(?:\s*(?:no\.?|number|n[o#]|date|id))?)\b"
+    )
+    matches = list(marker_pattern.finditer(normalized))
+    if len(matches) <= marker_limit:
+        return normalized
+    cutoff = matches[marker_limit].start()
+    return normalized[:cutoff].rstrip()
+
+
+def _postprocess_prediction_text(text: str) -> str:
+    cleaned = normalize_text(text)
+    if not cleaned:
+        return ""
+    cleaned = _dedupe_lines_global(cleaned)
+    cleaned = _collapse_repeated_ngrams(cleaned)
+    cleaned = _collapse_repeated_tokens(cleaned, max_consecutive=2)
+    return normalize_text(cleaned)
+
+
 def _build_generation_kwargs(
     *,
     max_new_tokens: int,
@@ -408,7 +498,10 @@ def _run_crop_first_ocr(
 ) -> Dict[str, Any]:
     t0 = time.perf_counter()
     page_image = image.convert("RGB")
-    plan = segment_page(page_image, segmentation_mode=segmentation_mode)
+    requested_mode = str(segmentation_mode or "line_only").strip().lower()
+    # TrOCR behaves more reliably on line-level OCR than on larger block/page generation.
+    effective_mode = "line_only" if requested_mode in {"line_only", "line_block"} else requested_mode
+    plan = segment_page(page_image, segmentation_mode=effective_mode)
 
     def _ocr_segments(regions: Sequence[CropRegion]) -> List[str]:
         generation_kwargs = _build_generation_kwargs(
@@ -456,18 +549,9 @@ def _run_crop_first_ocr(
             cleaned_segment_texts.append(normalized_text)
 
         raw_output = "\n".join(cleaned_segment_texts).strip()
-        normalized_output = normalize_text(raw_output)
+        normalized_output = _postprocess_prediction_text(raw_output)
         total_chars = len(normalized_output)
         marker_count = _count_invoice_markers(normalized_output)
-        needs_full_page_retry = (
-            not active_plan.used_full_page_fallback
-            and active_plan.strategy != "full_page"
-            and (
-                segment_truncation_blocked
-                or total_chars > max_total_chars
-                or marker_count > max_invoice_markers_per_page
-            )
-        )
         return (
             segment_texts,
             deduped_segment_texts,
@@ -477,10 +561,12 @@ def _run_crop_first_ocr(
             segment_truncation_count,
             total_chars,
             marker_count,
-            needs_full_page_retry,
+            segment_truncation_blocked,
         )
 
     fallback_reason = None
+    guardrail_marker_cap_applied = False
+    guardrail_char_cap_applied = False
     try:
         for _ in range(2):
             (
@@ -492,22 +578,29 @@ def _run_crop_first_ocr(
                 segment_truncation_count,
                 total_chars,
                 marker_count,
-                needs_full_page_retry,
+                segment_truncation_blocked,
             ) = _extract_output(plan)
-            if needs_full_page_retry:
-                if total_chars > max_total_chars:
-                    fallback_reason = "max_total_chars_exceeded"
-                elif marker_count > max_invoice_markers_per_page:
-                    fallback_reason = "max_invoice_markers_per_page_exceeded"
-                else:
-                    fallback_reason = "segment_too_long"
+            if (
+                segment_truncation_blocked
+                and not plan.used_full_page_fallback
+                and plan.strategy != "full_page"
+            ):
+                fallback_reason = "segment_too_long"
                 plan = _full_page_plan(page_image.size, fallback_reason)
                 continue
+
+            if marker_count > max_invoice_markers_per_page:
+                normalized_output = _limit_invoice_sections(normalized_output, max_invoice_markers_per_page)
+                raw_output = normalized_output
+                marker_count = _count_invoice_markers(normalized_output)
+                total_chars = len(normalized_output)
+                guardrail_marker_cap_applied = True
 
             if total_chars > max_total_chars:
                 normalized_output = _truncate_text(normalized_output, max_total_chars)
                 raw_output = normalized_output
                 total_chars = len(normalized_output)
+                guardrail_char_cap_applied = True
             break
         else:  # pragma: no cover - defensive safeguard
             raise RuntimeError("OCR guardrails failed to converge")
@@ -525,11 +618,12 @@ def _run_crop_first_ocr(
             segment_truncation_count,
             total_chars,
             marker_count,
-            _needs_full_page_retry,
+            _segment_truncation_blocked,
         ) = _extract_output(plan)
         if total_chars > max_total_chars:
             normalized_output = _truncate_text(normalized_output, max_total_chars)
             raw_output = normalized_output
+            guardrail_char_cap_applied = True
 
     if not normalize_text(raw_output) and not plan.used_full_page_fallback:
         fallback_reason = "empty_crop_output"
@@ -543,11 +637,12 @@ def _run_crop_first_ocr(
             segment_truncation_count,
             total_chars,
             marker_count,
-            _needs_full_page_retry,
+            _segment_truncation_blocked,
         ) = _extract_output(plan)
         if total_chars > max_total_chars:
             normalized_output = _truncate_text(normalized_output, max_total_chars)
             raw_output = normalized_output
+            guardrail_char_cap_applied = True
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
     return {
@@ -556,6 +651,7 @@ def _run_crop_first_ocr(
         "normalized_output": normalized_output,
         "raw_output": raw_output,
         "latency_ms": round(latency_ms, 3),
+        "requested_segmentation_mode": requested_mode,
         "segmentation_strategy": plan.strategy,
         "used_full_page_fallback": bool(plan.used_full_page_fallback),
         "fallback_reason": plan.fallback_reason,
@@ -571,6 +667,9 @@ def _run_crop_first_ocr(
         "max_total_chars": int(max_total_chars),
         "max_invoice_markers_per_page": int(max_invoice_markers_per_page),
         "hard_truncate_segment_text": bool(hard_truncate_segment_text),
+        "guardrail_marker_cap_applied": bool(guardrail_marker_cap_applied),
+        "guardrail_char_cap_applied": bool(guardrail_char_cap_applied),
+        "invoice_marker_count": int(marker_count),
     }
 
 

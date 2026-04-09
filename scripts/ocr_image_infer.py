@@ -17,16 +17,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", type=str, required=True)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
-    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--max-new-tokens", type=int, default=80)
     parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=6)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=5)
     parser.add_argument("--repetition-penalty", type=float, default=1.2)
     parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
-    parser.add_argument("--max-chars-per-segment", type=int, default=320)
-    parser.add_argument("--max-total-chars", type=int, default=2400)
-    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument("--max-chars-per-segment", type=int, default=256)
+    parser.add_argument("--max-total-chars", type=int, default=1200)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=4)
     parser.add_argument(
         "--hard-truncate-segment-text",
         action=argparse.BooleanOptionalAction,

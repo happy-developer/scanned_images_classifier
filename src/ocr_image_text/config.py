@@ -33,7 +33,7 @@ class TrainConfig:
     image_size: int = 768
     use_grayscale: bool = True
     learning_rate: float = 3e-5
-    train_epochs: int = 2
+    train_epochs: int = 10
     per_device_train_batch_size: int = 2
     per_device_eval_batch_size: int = 2
     random_seed: int = 3407
@@ -45,10 +45,10 @@ class TrainConfig:
     allow_long_training: bool = False
     require_supervised_eval: bool = True
     allow_unlabeled_eval: bool = False
-    generation_num_beams: int = 4
+    generation_num_beams: int = 2
     generation_length_penalty: float = 1.0
-    generation_no_repeat_ngram_size: int = 4
-    generation_repetition_penalty: float = 1.15
+    generation_no_repeat_ngram_size: int = 5
+    generation_repetition_penalty: float = 1.2
 
 
 @dataclass(frozen=True)
@@ -56,14 +56,14 @@ class InferConfig:
     artifacts_dir: Path
     image_size: int = 768
     use_grayscale: bool = True
-    max_new_tokens: int = 96
+    max_new_tokens: int = 80
     num_beams: int = 1
     temperature: float = 0.0
     length_penalty: float = 1.0
-    no_repeat_ngram_size: int = 6
+    no_repeat_ngram_size: int = 5
     repetition_penalty: float = 1.2
     segmentation_mode: str = "line_only"
-    max_chars_per_segment: int = 320
-    max_total_chars: int = 2400
-    max_invoice_markers_per_page: int = 2
+    max_chars_per_segment: int = 256
+    max_total_chars: int = 1200
+    max_invoice_markers_per_page: int = 4
     hard_truncate_segment_text: bool = True

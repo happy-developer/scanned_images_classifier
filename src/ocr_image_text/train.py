@@ -321,10 +321,10 @@ def _compute_cer_metrics(eval_preds, tokenizer) -> Dict[str, float]:
 
 def run_training(config: TrainConfig) -> Dict[str, Any]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    if int(config.train_epochs) > 3 and not bool(config.allow_long_training):
+    if int(config.train_epochs) > 10:
         raise ValueError(
-            "Refusing to start a long training run with epochs > 3. "
-            "Pass --allow-long-training explicitly if this is intentional."
+            "Refusing to start training with epochs > 10. "
+            "Keep runs <= 10 epochs and rely on early stopping on eval_cer."
         )
 
     eval_records, supervised_eval_enabled, eval_mode = _resolve_eval_records(config)
