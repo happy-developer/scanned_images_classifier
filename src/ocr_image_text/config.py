@@ -36,6 +36,13 @@ class TrainConfig:
     train_epochs: int = 10
     per_device_train_batch_size: int = 2
     per_device_eval_batch_size: int = 2
+    gradient_accumulation_steps: int = 1
+    dataloader_num_workers: int = 2
+    dataloader_pin_memory: bool = False
+    dataloader_persistent_workers: bool = False
+    fp16: bool = False
+    bf16: bool = False
+    auto_hardware_profile: bool = True
     random_seed: int = 3407
     lr_scheduler_type: str = "cosine"
     early_stopping_patience: int = 2

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import json
+import os
+import inspect
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List
@@ -51,6 +53,110 @@ def _set_processor_resize(processor: Any, image_size: int, model: Any | None = N
     image_processor.do_resize = True
     image_processor.size = {"height": side, "width": side}
     return side
+
+
+def _detect_training_profile(config: TrainConfig) -> Dict[str, Any]:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    cpu_count = os.cpu_count() or 2
+    workers = max(2, min(8, cpu_count // 2))
+
+    profile: Dict[str, Any] = {
+        "auto_hardware_profile": bool(config.auto_hardware_profile),
+        "device": device,
+        "gpu_name": None,
+        "vram_gb": 0.0,
+        "per_device_train_batch_size": max(1, int(config.per_device_train_batch_size)),
+        "per_device_eval_batch_size": max(1, int(config.per_device_eval_batch_size)),
+        "gradient_accumulation_steps": max(1, int(config.gradient_accumulation_steps)),
+        "dataloader_num_workers": max(0, int(config.dataloader_num_workers)),
+        "dataloader_pin_memory": bool(config.dataloader_pin_memory),
+        "dataloader_persistent_workers": bool(config.dataloader_persistent_workers),
+        "fp16": bool(config.fp16),
+        "bf16": bool(config.bf16),
+    }
+
+    if not bool(config.auto_hardware_profile):
+        if profile["dataloader_num_workers"] <= 0:
+            profile["dataloader_persistent_workers"] = False
+        if profile["fp16"]:
+            profile["bf16"] = False
+        return profile
+
+    # Auto profile defaults.
+    profile.update(
+        {
+            "dataloader_num_workers": min(4, workers),
+            "dataloader_pin_memory": device == "cuda",
+            "dataloader_persistent_workers": True,
+            "fp16": False,
+            "bf16": False,
+        }
+    )
+
+    if device == "cuda":
+        props = torch.cuda.get_device_properties(0)
+        vram_gb = props.total_memory / (1024 ** 3)
+        profile.update(
+            {
+                "gpu_name": props.name,
+                "vram_gb": round(float(vram_gb), 1),
+                "fp16": True,
+                "dataloader_num_workers": workers,
+            }
+        )
+
+        if vram_gb >= 14:
+            profile.update(
+                {
+                    "per_device_train_batch_size": 8,
+                    "per_device_eval_batch_size": 8,
+                    "gradient_accumulation_steps": 2,
+                }
+            )
+        elif vram_gb >= 10:
+            profile.update(
+                {
+                    "per_device_train_batch_size": 6,
+                    "per_device_eval_batch_size": 6,
+                    "gradient_accumulation_steps": 2,
+                }
+            )
+        elif vram_gb >= 7.5:
+            profile.update(
+                {
+                    "per_device_train_batch_size": 4,
+                    "per_device_eval_batch_size": 4,
+                    "gradient_accumulation_steps": 4,
+                }
+            )
+        else:
+            profile.update(
+                {
+                    "per_device_train_batch_size": 2,
+                    "per_device_eval_batch_size": 2,
+                    "gradient_accumulation_steps": 8,
+                }
+            )
+
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = True
+    else:
+        # CPU fallback profile.
+        profile.update(
+            {
+                "per_device_train_batch_size": 2,
+                "per_device_eval_batch_size": 2,
+                "gradient_accumulation_steps": 8,
+                "dataloader_pin_memory": False,
+            }
+        )
+
+    if profile["dataloader_num_workers"] <= 0:
+        profile["dataloader_persistent_workers"] = False
+    if profile["fp16"]:
+        profile["bf16"] = False
+
+    return profile
 
 
 def _preprocess_image(image_path: Path, use_grayscale: bool) -> Image.Image:
@@ -341,6 +447,28 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
     processor = TrOCRProcessor.from_pretrained(config.model_name)
     model = VisionEncoderDecoderModel.from_pretrained(config.model_name)
     effective_image_size = _set_processor_resize(processor, config.image_size, model=model)
+    training_profile = _detect_training_profile(config)
+
+    print("Detected training profile")
+    for key in (
+        "auto_hardware_profile",
+        "device",
+        "gpu_name",
+        "vram_gb",
+        "per_device_train_batch_size",
+        "per_device_eval_batch_size",
+        "gradient_accumulation_steps",
+        "dataloader_num_workers",
+        "dataloader_pin_memory",
+        "dataloader_persistent_workers",
+        "fp16",
+        "bf16",
+    ):
+        print(f"  {key}: {training_profile.get(key)}")
+    print(
+        "  effective_batch_size:",
+        int(training_profile["per_device_train_batch_size"]) * int(training_profile["gradient_accumulation_steps"]),
+    )
 
     tok = processor.tokenizer
     start_id = tok.bos_token_id if tok.bos_token_id is not None else tok.cls_token_id
@@ -363,27 +491,36 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
     if supervised_eval_enabled:
         eval_ds = OCRDataset(eval_records, processor, config.max_target_length, use_grayscale=bool(config.use_grayscale))
 
-    args = Seq2SeqTrainingArguments(
-        output_dir=str(config.output_dir / "checkpoints"),
-        learning_rate=config.learning_rate,
-        lr_scheduler_type=config.lr_scheduler_type,
-        num_train_epochs=config.train_epochs,
-        per_device_train_batch_size=config.per_device_train_batch_size,
-        per_device_eval_batch_size=config.per_device_eval_batch_size,
-        predict_with_generate=True,
-        generation_max_length=config.max_target_length,
-        generation_num_beams=max(1, int(config.generation_num_beams)),
-        logging_strategy="epoch",
-        eval_strategy="epoch" if supervised_eval_enabled else "no",
-        save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=bool(supervised_eval_enabled),
-        metric_for_best_model=config.metric_for_best_model if supervised_eval_enabled else None,
-        greater_is_better=config.greater_is_better if supervised_eval_enabled else None,
-        report_to="none",
-        seed=config.random_seed,
-        data_seed=config.random_seed,
-    )
+    args_kwargs = {
+        "output_dir": str(config.output_dir / "checkpoints"),
+        "learning_rate": config.learning_rate,
+        "lr_scheduler_type": config.lr_scheduler_type,
+        "num_train_epochs": config.train_epochs,
+        "per_device_train_batch_size": int(training_profile["per_device_train_batch_size"]),
+        "per_device_eval_batch_size": int(training_profile["per_device_eval_batch_size"]),
+        "gradient_accumulation_steps": int(training_profile["gradient_accumulation_steps"]),
+        "predict_with_generate": True,
+        "generation_max_length": config.max_target_length,
+        "generation_num_beams": max(1, int(config.generation_num_beams)),
+        "logging_strategy": "epoch",
+        "eval_strategy": "epoch" if supervised_eval_enabled else "no",
+        "save_strategy": "epoch",
+        "save_total_limit": 2,
+        "load_best_model_at_end": bool(supervised_eval_enabled),
+        "metric_for_best_model": config.metric_for_best_model if supervised_eval_enabled else None,
+        "greater_is_better": config.greater_is_better if supervised_eval_enabled else None,
+        "report_to": "none",
+        "seed": config.random_seed,
+        "data_seed": config.random_seed,
+        "dataloader_num_workers": int(training_profile["dataloader_num_workers"]),
+        "dataloader_pin_memory": bool(training_profile["dataloader_pin_memory"]),
+        "dataloader_persistent_workers": bool(training_profile["dataloader_persistent_workers"]),
+        "fp16": bool(training_profile["fp16"]),
+        "bf16": bool(training_profile["bf16"]),
+    }
+    supported = set(inspect.signature(Seq2SeqTrainingArguments.__init__).parameters.keys())
+    filtered_args_kwargs = {k: v for k, v in args_kwargs.items() if k in supported}
+    args = Seq2SeqTrainingArguments(**filtered_args_kwargs)
 
     trainer = Seq2SeqTrainer(
         model=model,
@@ -440,6 +577,7 @@ def run_training(config: TrainConfig) -> Dict[str, Any]:
 
     summary = {
         "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(config).items()},
+        "training_profile": training_profile,
         "effective_image_size": int(effective_image_size),
         "supervised_eval_enabled": supervised_eval_enabled,
         "eval_mode": eval_mode,

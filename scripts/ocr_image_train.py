@@ -61,6 +61,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--train-batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--dataloader-num-workers", type=int, default=2)
+    parser.add_argument(
+        "--dataloader-pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--dataloader-persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--auto-hardware-profile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Automatically adapt batch/accumulation/precision to available GPU VRAM.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
@@ -116,6 +136,13 @@ def main() -> None:
         allow_unlabeled_eval=args.allow_unlabeled_eval,
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_pin_memory=args.dataloader_pin_memory,
+        dataloader_persistent_workers=args.dataloader_persistent_workers,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        auto_hardware_profile=args.auto_hardware_profile,
         learning_rate=args.learning_rate,
         image_size=args.image_size,
         use_grayscale=not args.no_grayscale,
