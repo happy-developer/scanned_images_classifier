@@ -39,6 +39,18 @@ def parse_args() -> argparse.Namespace:
         default="batch_1/batch_1/batch1_1,batch_1/batch_1/batch1_2,batch_1/batch_1/batch1_3",
         help="Comma-separated image subdir list matching --train-csvs order",
     )
+    parser.add_argument(
+        "--extra-train-csvs",
+        type=str,
+        default="",
+        help="Optional comma-separated extra annotated train CSV files (e.g. real invoices/tickets).",
+    )
+    parser.add_argument(
+        "--extra-image-subdirs-train",
+        type=str,
+        default="",
+        help="Optional comma-separated image subdirs matching --extra-train-csvs order.",
+    )
     parser.add_argument("--image-subdir-eval", type=str, default="batch_2/batch_2/batch2_1")
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--max-eval-samples", type=int, default=0)
@@ -84,10 +96,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--no-grayscale", action="store_true", help="Disable grayscale preprocessing")
-    parser.add_argument("--num-beams", type=int, default=2)
+    parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--length-penalty", type=float, default=1.0)
     parser.add_argument("--no-repeat-ngram-size", type=int, default=5)
-    parser.add_argument("--repetition-penalty", type=float, default=1.2)
+    parser.add_argument("--repetition-penalty", type=float, default=1.25)
     return parser.parse_args()
 
 
@@ -119,6 +131,18 @@ def main() -> None:
         eval_csv = args.eval_csv
         image_subdirs_train = tuple(s.strip() for s in args.image_subdirs_train.split(",") if s.strip())
         image_subdir_eval = args.image_subdir_eval
+
+    extra_train_csvs = tuple(s.strip() for s in args.extra_train_csvs.split(",") if s.strip())
+    extra_image_subdirs = tuple(s.strip() for s in args.extra_image_subdirs_train.split(",") if s.strip())
+    if extra_train_csvs:
+        if not extra_image_subdirs:
+            extra_image_subdirs = tuple("." for _ in extra_train_csvs)
+        if len(extra_image_subdirs) != len(extra_train_csvs):
+            raise ValueError(
+                "--extra-image-subdirs-train must have the same number of entries as --extra-train-csvs."
+            )
+        train_csvs = tuple(list(train_csvs) + list(extra_train_csvs))
+        image_subdirs_train = tuple(list(image_subdirs_train) + list(extra_image_subdirs))
 
     cfg = TrainConfig(
         data_root=data_root,

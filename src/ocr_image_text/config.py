@@ -52,10 +52,10 @@ class TrainConfig:
     allow_long_training: bool = False
     require_supervised_eval: bool = True
     allow_unlabeled_eval: bool = False
-    generation_num_beams: int = 2
+    generation_num_beams: int = 1
     generation_length_penalty: float = 1.0
     generation_no_repeat_ngram_size: int = 5
-    generation_repetition_penalty: float = 1.2
+    generation_repetition_penalty: float = 1.25
 
 
 @dataclass(frozen=True)
@@ -63,14 +63,16 @@ class InferConfig:
     artifacts_dir: Path
     image_size: int = 768
     use_grayscale: bool = True
-    max_new_tokens: int = 80
+    max_new_tokens: int = 64
     num_beams: int = 1
     temperature: float = 0.0
     length_penalty: float = 1.0
     no_repeat_ngram_size: int = 5
-    repetition_penalty: float = 1.2
+    repetition_penalty: float = 1.3
     segmentation_mode: str = "line_only"
     max_chars_per_segment: int = 256
     max_total_chars: int = 1200
-    max_invoice_markers_per_page: int = 4
+    max_invoice_markers_per_page: int = 1
     hard_truncate_segment_text: bool = True
+    max_crops: int = 28
+    crop_batch_size: int = 6

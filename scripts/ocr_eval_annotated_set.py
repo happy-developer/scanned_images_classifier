@@ -24,12 +24,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=6)
-    parser.add_argument("--repetition-penalty", type=float, default=1.2)
+    parser.add_argument("--no-repeat-ngram-size", type=int, default=5)
+    parser.add_argument("--repetition-penalty", type=float, default=1.3)
     parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
-    parser.add_argument("--max-chars-per-segment", type=int, default=320)
-    parser.add_argument("--max-total-chars", type=int, default=2400)
-    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument("--max-chars-per-segment", type=int, default=256)
+    parser.add_argument("--max-total-chars", type=int, default=1200)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=1)
+    parser.add_argument("--max-crops", type=int, default=28)
+    parser.add_argument("--crop-batch-size", type=int, default=6)
     parser.add_argument(
         "--hard-truncate-segment-text",
         action=argparse.BooleanOptionalAction,
@@ -126,6 +128,8 @@ def main() -> None:
             max_total_chars=args.max_total_chars,
             max_invoice_markers_per_page=args.max_invoice_markers_per_page,
             hard_truncate_segment_text=args.hard_truncate_segment_text,
+            max_crops=args.max_crops,
+            crop_batch_size=args.crop_batch_size,
         )
     )
 
@@ -140,6 +144,8 @@ def main() -> None:
             max_total_chars=args.max_total_chars,
             max_invoice_markers_per_page=args.max_invoice_markers_per_page,
             hard_truncate_segment_text=args.hard_truncate_segment_text,
+            max_crops=args.max_crops,
+            crop_batch_size=args.crop_batch_size,
         )
         pred = str(out.get("prediction", ""))
         predictions[rec.img_name] = pred
@@ -175,6 +181,8 @@ def main() -> None:
             "max_total_chars": args.max_total_chars,
             "max_invoice_markers_per_page": args.max_invoice_markers_per_page,
             "hard_truncate_segment_text": args.hard_truncate_segment_text,
+            "max_crops": args.max_crops,
+            "crop_batch_size": args.crop_batch_size,
         },
         "metrics": metrics,
         "avg_latency_ms": total_latency_ms / len(records) if records else 0.0,

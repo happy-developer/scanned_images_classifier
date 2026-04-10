@@ -160,12 +160,31 @@ def _text_similarity_key(text: str) -> str:
     return re.sub(r'[^0-9a-z]+', ' ', normalized).strip()
 
 
+def _text_structure_key(text: str) -> str:
+    key = _text_similarity_key(text)
+    # Ignore numeric variation when comparing repeated invoice-like hallucinations.
+    key = re.sub(r"\d", "0", key)
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def _token_jaccard(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[0-9a-z]+", _text_similarity_key(left)))
+    right_tokens = set(re.findall(r"[0-9a-z]+", _text_similarity_key(right)))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    inter = len(left_tokens.intersection(right_tokens))
+    union = len(left_tokens.union(right_tokens))
+    return float(inter) / float(max(1, union))
+
+
 def _is_near_duplicate_text(previous: str, current: str) -> bool:
     previous_key = _text_similarity_key(previous)
     current_key = _text_similarity_key(current)
     if not previous_key or not current_key:
         return False
     if previous_key == current_key:
+        return True
+    if _text_structure_key(previous_key) == _text_structure_key(current_key):
         return True
 
     previous_len = len(previous_key)
@@ -174,7 +193,35 @@ def _is_near_duplicate_text(previous: str, current: str) -> bool:
         return False
 
     ratio = SequenceMatcher(None, previous_key, current_key).ratio()
-    return ratio >= 0.96
+    jaccard = _token_jaccard(previous_key, current_key)
+    return ratio >= 0.92 or jaccard >= 0.9
+
+
+def _field_label_counts(text: str) -> Dict[str, int]:
+    normalized = normalize_text(text).casefold()
+    if not normalized:
+        return {"invoice": 0, "date": 0, "tax_id": 0, "iban": 0, "items": 0}
+    return {
+        "invoice": len(re.findall(r"\binvoice(?:\s*(?:no\.?|number|n[o#]))?\b", normalized)),
+        "date": len(re.findall(r"\bdate(?:\s*of\s*issue)?\b", normalized)),
+        "tax_id": len(re.findall(r"\btax\s*id\b", normalized)),
+        "iban": len(re.findall(r"\biban\b", normalized)),
+        "items": len(re.findall(r"\bitems?\b", normalized)),
+    }
+
+
+def _field_hit_count(text: str) -> int:
+    counts = _field_label_counts(text)
+    return sum(1 for value in counts.values() if value > 0)
+
+
+def _has_repeated_key_fields(text: str) -> bool:
+    counts = _field_label_counts(text)
+    return bool(
+        counts["tax_id"] > 1
+        or counts["iban"] > 1
+        or counts["invoice"] > 1
+    )
 
 
 def _dedupe_neighboring_text_segments(segment_texts: Sequence[str]) -> Tuple[List[str], int]:
@@ -184,11 +231,32 @@ def _dedupe_neighboring_text_segments(segment_texts: Sequence[str]) -> Tuple[Lis
         normalized = normalize_text(text)
         if not normalized:
             continue
-        if deduped and _is_near_duplicate_text(deduped[-1], normalized):
+        if any(_is_near_duplicate_text(existing, normalized) for existing in deduped):
             skipped += 1
             continue
         deduped.append(normalized)
     return deduped, skipped
+
+
+def _filter_noisy_segments(segment_texts: Sequence[str]) -> Tuple[List[str], int]:
+    filtered: List[str] = []
+    skipped = 0
+    field_heavy_seen = False
+    for text in segment_texts:
+        normalized = normalize_text(text)
+        if not normalized:
+            continue
+        if _has_repeated_key_fields(normalized):
+            skipped += 1
+            continue
+        field_hits = _field_hit_count(normalized)
+        if field_hits >= 3:
+            if field_heavy_seen:
+                skipped += 1
+                continue
+            field_heavy_seen = True
+        filtered.append(normalized)
+    return filtered, skipped
 
 
 def _full_page_plan(page_size: Tuple[int, int], reason: str) -> SegmentationPlan:
@@ -208,7 +276,7 @@ def segment_page(
     image: Image.Image,
     *,
     segmentation_mode: str = "line_only",
-    max_regions: int = 64,
+    max_regions: int = 32,
 ) -> SegmentationPlan:
     rgb = image.convert("RGB")
     width, height = rgb.size
@@ -248,23 +316,34 @@ def segment_page(
         return _full_page_plan((width, height), "mask_cleared_by_dilation")
 
     row_scores = mask.sum(axis=1)
-    row_threshold = max(2, int(width * 0.004))
-    row_spans = _merge_spans(_find_spans(row_scores, row_threshold), max_gap=1)
+    row_threshold = max(2, int(width * 0.005))
+    row_spans = _merge_spans(_find_spans(row_scores, row_threshold), max_gap=2)
     if not row_spans:
         return _full_page_plan((width, height), "no_text_rows_detected")
 
     crop_regions: List[CropRegion] = []
+    scored_regions: List[Tuple[float, int, CropRegion]] = []
     area_floor = max(256, int(width * height * 0.0005))
     pad_x = max(6, width // 80)
     pad_y = max(4, height // 100)
+    min_band_height = max(8, height // 320)
+    adaptive_max_regions = max(8, min(int(max_regions), max(8, height // 70)))
 
     for y0, y1 in row_spans:
         band = mask[y0 : y1 + 1, :]
         band_height = max(1, y1 - y0 + 1)
+        if band_height < min_band_height:
+            continue
+        band_density = float(band.sum()) / float(max(1, band_height * width))
+        if band_density < 0.004:
+            continue
+
         if mode == "line_only":
             box = _expand_box(0, y0, width, y1 + 1, width, height, pad_x=pad_x, pad_y=pad_y)
             if _box_area(box) >= area_floor:
-                crop_regions.append(CropRegion(box=box, label="line"))
+                region = CropRegion(box=box, label="line")
+                score = band_density * max(1.0, float(band_height))
+                scored_regions.append((score, y0, region))
         else:
             col_scores = band.sum(axis=0)
             col_threshold = max(2, int(band_height * 0.01))
@@ -276,11 +355,15 @@ def segment_page(
                 box = _expand_box(x0, y0, x1 + 1, y1 + 1, width, height, pad_x=pad_x, pad_y=pad_y)
                 if _box_area(box) < area_floor:
                     continue
-                crop_regions.append(CropRegion(box=box, label="block" if len(col_spans) > 1 else "line"))
-                if len(crop_regions) >= max_regions:
-                    break
-        if len(crop_regions) >= max_regions:
-            break
+                region = CropRegion(box=box, label="block" if len(col_spans) > 1 else "line")
+                box_width = max(1, x1 - x0 + 1)
+                score = band_density * max(1.0, float(band_height)) * (float(box_width) / float(max(1, width)))
+                scored_regions.append((score, y0, region))
+
+    if scored_regions:
+        # Keep the most content-dense regions first, then restore reading order.
+        top_scored = sorted(scored_regions, key=lambda item: item[0], reverse=True)[:adaptive_max_regions]
+        crop_regions = [region for _, _, region in sorted(top_scored, key=lambda item: item[1])]
 
     if not crop_regions:
         return _full_page_plan((width, height), "no_usable_crops")
@@ -392,6 +475,25 @@ def _dedupe_lines_global(text: str) -> str:
     return "\n".join(deduped).strip()
 
 
+def _remove_noisy_field_lines(text: str) -> str:
+    lines = [line.strip() for line in normalize_text(text).split("\n") if line.strip()]
+    if not lines:
+        return ""
+
+    kept: List[str] = []
+    heavy_line_seen = False
+    for line in lines:
+        if _has_repeated_key_fields(line):
+            continue
+        field_hits = _field_hit_count(line)
+        if field_hits >= 3:
+            if heavy_line_seen:
+                continue
+            heavy_line_seen = True
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def _limit_invoice_sections(text: str, max_invoice_markers: int) -> str:
     marker_limit = max(1, int(max_invoice_markers))
     normalized = normalize_text(text)
@@ -412,6 +514,7 @@ def _postprocess_prediction_text(text: str) -> str:
     cleaned = normalize_text(text)
     if not cleaned:
         return ""
+    cleaned = _remove_noisy_field_lines(cleaned)
     cleaned = _dedupe_lines_global(cleaned)
     cleaned = _collapse_repeated_ngrams(cleaned)
     cleaned = _collapse_repeated_tokens(cleaned, max_consecutive=2)
@@ -490,18 +593,19 @@ def _run_crop_first_ocr(
     length_penalty: float,
     no_repeat_ngram_size: int,
     repetition_penalty: float,
-    max_chars_per_segment: int = 320,
-    max_total_chars: int = 2400,
-    max_invoice_markers_per_page: int = 2,
+    max_chars_per_segment: int = 256,
+    max_total_chars: int = 1200,
+    max_invoice_markers_per_page: int = 1,
     hard_truncate_segment_text: bool = True,
-    batch_size: int = 4,
+    batch_size: int = 6,
+    max_crops: int = 28,
 ) -> Dict[str, Any]:
     t0 = time.perf_counter()
     page_image = image.convert("RGB")
     requested_mode = str(segmentation_mode or "line_only").strip().lower()
     # TrOCR behaves more reliably on line-level OCR than on larger block/page generation.
     effective_mode = "line_only" if requested_mode in {"line_only", "line_block"} else requested_mode
-    plan = segment_page(page_image, segmentation_mode=effective_mode)
+    plan = segment_page(page_image, segmentation_mode=effective_mode, max_regions=max(4, int(max_crops)))
 
     def _ocr_segments(regions: Sequence[CropRegion]) -> List[str]:
         generation_kwargs = _build_generation_kwargs(
@@ -529,14 +633,15 @@ def _run_crop_first_ocr(
 
     def _extract_output(
         active_plan: SegmentationPlan,
-    ) -> tuple[List[str], List[str], int, str, str, int, int, int, bool]:
+    ) -> tuple[List[str], List[str], int, int, str, str, int, int, int, bool]:
         segment_texts = _ocr_segments(active_plan.crop_regions)
         deduped_segment_texts, duplicate_segment_count = _dedupe_neighboring_text_segments(segment_texts)
+        filtered_segment_texts, noisy_segment_count = _filter_noisy_segments(deduped_segment_texts)
 
         cleaned_segment_texts: List[str] = []
         segment_truncation_blocked = False
         segment_truncation_count = 0
-        for text in deduped_segment_texts:
+        for text in filtered_segment_texts:
             normalized_text = normalize_text(text)
             if not normalized_text:
                 continue
@@ -554,8 +659,9 @@ def _run_crop_first_ocr(
         marker_count = _count_invoice_markers(normalized_output)
         return (
             segment_texts,
-            deduped_segment_texts,
+            filtered_segment_texts,
             duplicate_segment_count,
+            noisy_segment_count,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -573,6 +679,7 @@ def _run_crop_first_ocr(
                 segment_texts,
                 deduped_segment_texts,
                 duplicate_segment_count,
+                noisy_segment_count,
                 raw_output,
                 normalized_output,
                 segment_truncation_count,
@@ -613,6 +720,7 @@ def _run_crop_first_ocr(
             segment_texts,
             deduped_segment_texts,
             duplicate_segment_count,
+            noisy_segment_count,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -632,6 +740,7 @@ def _run_crop_first_ocr(
             segment_texts,
             deduped_segment_texts,
             duplicate_segment_count,
+            noisy_segment_count,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -662,6 +771,7 @@ def _run_crop_first_ocr(
         "segment_count": len(segment_texts),
         "deduplicated_segment_count": len(deduped_segment_texts),
         "duplicate_segment_count": int(duplicate_segment_count),
+        "noisy_segment_count": int(noisy_segment_count),
         "segment_truncation_count": int(segment_truncation_count),
         "max_chars_per_segment": int(max_chars_per_segment),
         "max_total_chars": int(max_total_chars),
@@ -670,6 +780,8 @@ def _run_crop_first_ocr(
         "guardrail_marker_cap_applied": bool(guardrail_marker_cap_applied),
         "guardrail_char_cap_applied": bool(guardrail_char_cap_applied),
         "invoice_marker_count": int(marker_count),
+        "max_crops": int(max_crops),
+        "crop_batch_size": int(batch_size),
     }
 
 

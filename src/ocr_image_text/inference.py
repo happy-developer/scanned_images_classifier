@@ -63,6 +63,8 @@ class Predictor:
         max_total_chars: int | None = None,
         max_invoice_markers_per_page: int | None = None,
         hard_truncate_segment_text: bool | None = None,
+        max_crops: int | None = None,
+        crop_batch_size: int | None = None,
     ) -> Dict[str, Any]:
         image = _preprocess_image(image_path, use_grayscale=bool(self.infer_config.use_grayscale))
         result = _run_crop_first_ocr(
@@ -101,6 +103,12 @@ class Predictor:
                 self.infer_config.hard_truncate_segment_text
                 if hard_truncate_segment_text is None
                 else bool(hard_truncate_segment_text)
+            ),
+            max_crops=(
+                self.infer_config.max_crops if max_crops is None else int(max_crops)
+            ),
+            batch_size=(
+                self.infer_config.crop_batch_size if crop_batch_size is None else int(crop_batch_size)
             ),
         )
         result["effective_image_size"] = int(self.effective_image_size)

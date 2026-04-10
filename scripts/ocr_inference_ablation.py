@@ -111,8 +111,8 @@ def _generation_params(guard_rail: str) -> tuple[int, float, bool]:
     if guard_rail == "off":
         return 0, 1.0, False
     if guard_rail == "strict":
-        return 6, 1.25, True
-    return 4, 1.15, True
+        return 6, 1.35, True
+    return 5, 1.25, True
 
 
 @dataclass(frozen=True)
@@ -233,13 +233,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-new-tokens-values",
         type=str,
-        default="64,96",
+        default="48,64",
         help="Comma-separated values for max_new_tokens.",
     )
     parser.add_argument(
         "--num-beams-values",
         type=str,
-        default="1,2",
+        default="1",
         help="Comma-separated values for num_beams.",
     )
     parser.add_argument(
@@ -420,12 +420,12 @@ def main() -> None:
                 artifacts_dir=artifacts_dir,
                 image_size=args.image_size,
                 use_grayscale=True,
-                max_new_tokens=80,
+                max_new_tokens=64,
                 num_beams=1,
                 temperature=0.0,
                 length_penalty=1.0,
                 no_repeat_ngram_size=5,
-                repetition_penalty=1.2,
+                repetition_penalty=1.3,
             )
         )
     except Exception as exc:
