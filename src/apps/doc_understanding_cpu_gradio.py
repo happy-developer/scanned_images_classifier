@@ -168,14 +168,14 @@ def build_app(config: AppConfig):
         with gr.Row():
             image_input = gr.Image(type="filepath", label="Document image")
             with gr.Column():
-                max_tokens_input = gr.Slider(minimum=16, maximum=1024, step=16, value=192, label="max_new_tokens")
-                num_beams_input = gr.Slider(minimum=1, maximum=8, step=1, value=4, label="num_beams")
-                no_repeat_input = gr.Slider(minimum=0, maximum=8, step=1, value=4, label="no_repeat_ngram_size")
+                max_tokens_input = gr.Slider(minimum=16, maximum=1024, step=16, value=64, label="max_new_tokens")
+                num_beams_input = gr.Slider(minimum=1, maximum=8, step=1, value=1, label="num_beams")
+                no_repeat_input = gr.Slider(minimum=0, maximum=8, step=1, value=5, label="no_repeat_ngram_size")
                 repetition_penalty_input = gr.Slider(
                     minimum=1.0,
                     maximum=2.0,
                     step=0.05,
-                    value=1.15,
+                    value=1.3,
                     label="repetition_penalty",
                 )
                 run_button = gr.Button("Run OCR", variant="primary")
@@ -214,4 +214,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

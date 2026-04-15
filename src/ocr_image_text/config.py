@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_MODEL_NAME = "microsoft/trocr-small-printed"
+DEFAULT_MODEL_NAME = "microsoft/trocr-base-printed"
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,8 @@ class InferConfig:
     segmentation_mode: str = "line_only"
     max_chars_per_segment: int = 256
     max_total_chars: int = 1200
-    max_invoice_markers_per_page: int = 1
+    max_invoice_markers_per_page: int = 2
     hard_truncate_segment_text: bool = True
-    max_crops: int = 28
+    max_crops: int = 16
     crop_batch_size: int = 6
+

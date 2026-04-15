@@ -11,6 +11,13 @@ from PIL import Image, ImageFilter, ImageOps
 
 from .formatting import normalize_text
 
+NEAR_DUP_RATIO_THRESHOLD = 0.96
+NEAR_DUP_JACCARD_THRESHOLD = 0.94
+DEDUPE_WINDOW_SIZE = 5
+REPEATED_FIELD_REJECTION_THRESHOLD = 2
+FIELD_HEAVY_HIT_THRESHOLD = 3
+FIELD_HEAVY_SEGMENT_TOP_N = 8
+
 
 @dataclass(frozen=True)
 class CropRegion:
@@ -194,7 +201,7 @@ def _is_near_duplicate_text(previous: str, current: str) -> bool:
 
     ratio = SequenceMatcher(None, previous_key, current_key).ratio()
     jaccard = _token_jaccard(previous_key, current_key)
-    return ratio >= 0.92 or jaccard >= 0.9
+    return ratio >= NEAR_DUP_RATIO_THRESHOLD or jaccard >= NEAR_DUP_JACCARD_THRESHOLD
 
 
 def _field_label_counts(text: str) -> Dict[str, int]:
@@ -215,48 +222,69 @@ def _field_hit_count(text: str) -> int:
     return sum(1 for value in counts.values() if value > 0)
 
 
-def _has_repeated_key_fields(text: str) -> bool:
+def _has_repeated_key_fields(text: str, *, repeated_threshold: int = REPEATED_FIELD_REJECTION_THRESHOLD) -> bool:
     counts = _field_label_counts(text)
+    threshold = max(1, int(repeated_threshold))
     return bool(
-        counts["tax_id"] > 1
-        or counts["iban"] > 1
-        or counts["invoice"] > 1
+        counts["tax_id"] > threshold
+        or counts["iban"] > threshold
+        or counts["invoice"] > threshold
     )
 
 
-def _dedupe_neighboring_text_segments(segment_texts: Sequence[str]) -> Tuple[List[str], int]:
+def _dedupe_neighboring_text_segments(
+    segment_texts: Sequence[str],
+    *,
+    window_size: int = DEDUPE_WINDOW_SIZE,
+) -> Tuple[List[str], int]:
     deduped: List[str] = []
     skipped = 0
+    local_window = max(1, int(window_size))
     for text in segment_texts:
         normalized = normalize_text(text)
         if not normalized:
             continue
-        if any(_is_near_duplicate_text(existing, normalized) for existing in deduped):
+        candidates = deduped[-local_window:]
+        if any(_is_near_duplicate_text(existing, normalized) for existing in candidates):
             skipped += 1
             continue
         deduped.append(normalized)
     return deduped, skipped
 
 
-def _filter_noisy_segments(segment_texts: Sequence[str]) -> Tuple[List[str], int]:
+def _filter_noisy_segments(
+    segment_texts: Sequence[str],
+    *,
+    max_field_heavy_segments: int = FIELD_HEAVY_SEGMENT_TOP_N,
+    field_hit_threshold: int = FIELD_HEAVY_HIT_THRESHOLD,
+) -> Tuple[List[str], Dict[str, int]]:
     filtered: List[str] = []
-    skipped = 0
-    field_heavy_seen = False
+    rejected_repeated_fields = 0
+    rejected_field_heavy_cap = 0
+    field_heavy_kept = 0
+    heavy_cap = max(1, int(max_field_heavy_segments))
+    hit_threshold = max(1, int(field_hit_threshold))
     for text in segment_texts:
         normalized = normalize_text(text)
         if not normalized:
             continue
         if _has_repeated_key_fields(normalized):
-            skipped += 1
+            rejected_repeated_fields += 1
             continue
         field_hits = _field_hit_count(normalized)
-        if field_hits >= 3:
-            if field_heavy_seen:
-                skipped += 1
+        if field_hits >= hit_threshold:
+            if field_heavy_kept >= heavy_cap:
+                rejected_field_heavy_cap += 1
                 continue
-            field_heavy_seen = True
+            field_heavy_kept += 1
         filtered.append(normalized)
-    return filtered, skipped
+    noisy_stats = {
+        "rejected_repeated_key_fields": int(rejected_repeated_fields),
+        "rejected_field_heavy_cap": int(rejected_field_heavy_cap),
+        "kept_field_heavy": int(field_heavy_kept),
+        "total_rejected": int(rejected_repeated_fields + rejected_field_heavy_cap),
+    }
+    return filtered, noisy_stats
 
 
 def _full_page_plan(page_size: Tuple[int, int], reason: str) -> SegmentationPlan:
@@ -326,7 +354,7 @@ def segment_page(
     area_floor = max(256, int(width * height * 0.0005))
     pad_x = max(6, width // 80)
     pad_y = max(4, height // 100)
-    min_band_height = max(8, height // 320)
+    min_band_height = max(10, height // 260)
     adaptive_max_regions = max(8, min(int(max_regions), max(8, height // 70)))
 
     for y0, y1 in row_spans:
@@ -335,7 +363,7 @@ def segment_page(
         if band_height < min_band_height:
             continue
         band_density = float(band.sum()) / float(max(1, band_height * width))
-        if band_density < 0.004:
+        if band_density < 0.006:
             continue
 
         if mode == "line_only":
@@ -481,15 +509,15 @@ def _remove_noisy_field_lines(text: str) -> str:
         return ""
 
     kept: List[str] = []
-    heavy_line_seen = False
+    heavy_line_kept = 0
     for line in lines:
         if _has_repeated_key_fields(line):
             continue
         field_hits = _field_hit_count(line)
-        if field_hits >= 3:
-            if heavy_line_seen:
+        if field_hits >= FIELD_HEAVY_HIT_THRESHOLD:
+            if heavy_line_kept >= FIELD_HEAVY_SEGMENT_TOP_N:
                 continue
-            heavy_line_seen = True
+            heavy_line_kept += 1
         kept.append(line)
     return "\n".join(kept).strip()
 
@@ -595,19 +623,23 @@ def _run_crop_first_ocr(
     repetition_penalty: float,
     max_chars_per_segment: int = 256,
     max_total_chars: int = 1200,
-    max_invoice_markers_per_page: int = 1,
+    max_invoice_markers_per_page: int = 2,
     hard_truncate_segment_text: bool = True,
     batch_size: int = 6,
-    max_crops: int = 28,
+    max_crops: int = 16,
 ) -> Dict[str, Any]:
     t0 = time.perf_counter()
     page_image = image.convert("RGB")
     requested_mode = str(segmentation_mode or "line_only").strip().lower()
     # TrOCR behaves more reliably on line-level OCR than on larger block/page generation.
     effective_mode = "line_only" if requested_mode in {"line_only", "line_block"} else requested_mode
+    t_segmentation_start = time.perf_counter()
     plan = segment_page(page_image, segmentation_mode=effective_mode, max_regions=max(4, int(max_crops)))
+    segmentation_latency_ms = (time.perf_counter() - t_segmentation_start) * 1000.0
+    timing_state: Dict[str, float] = {"ocr_ms": 0.0}
 
     def _ocr_segments(regions: Sequence[CropRegion]) -> List[str]:
+        nonlocal timing_state
         generation_kwargs = _build_generation_kwargs(
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
@@ -621,6 +653,7 @@ def _run_crop_first_ocr(
         for start in range(0, len(regions), max(1, int(batch_size))):
             batch = regions[start : start + max(1, int(batch_size))]
             batch_images = [page_image.crop(region.box) for region in batch]
+            t_ocr_batch_start = time.perf_counter()
             decoded_segments.extend(
                 _run_model_on_images(
                     model,
@@ -629,14 +662,15 @@ def _run_crop_first_ocr(
                     generation_kwargs=generation_kwargs,
                 )
             )
+            timing_state["ocr_ms"] += (time.perf_counter() - t_ocr_batch_start) * 1000.0
         return decoded_segments
 
     def _extract_output(
         active_plan: SegmentationPlan,
-    ) -> tuple[List[str], List[str], int, int, str, str, int, int, int, bool]:
+    ) -> tuple[List[str], List[str], List[str], int, Dict[str, int], str, str, int, int, int, bool]:
         segment_texts = _ocr_segments(active_plan.crop_regions)
         deduped_segment_texts, duplicate_segment_count = _dedupe_neighboring_text_segments(segment_texts)
-        filtered_segment_texts, noisy_segment_count = _filter_noisy_segments(deduped_segment_texts)
+        filtered_segment_texts, noisy_stats = _filter_noisy_segments(deduped_segment_texts)
 
         cleaned_segment_texts: List[str] = []
         segment_truncation_blocked = False
@@ -659,9 +693,10 @@ def _run_crop_first_ocr(
         marker_count = _count_invoice_markers(normalized_output)
         return (
             segment_texts,
+            deduped_segment_texts,
             filtered_segment_texts,
             duplicate_segment_count,
-            noisy_segment_count,
+            noisy_stats,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -673,13 +708,31 @@ def _run_crop_first_ocr(
     fallback_reason = None
     guardrail_marker_cap_applied = False
     guardrail_char_cap_applied = False
+    marker_cap_rejected_markers_count = 0
+    char_cap_trimmed_chars = 0
+    segment_texts: List[str] = []
+    deduped_segment_texts: List[str] = []
+    filtered_segment_texts: List[str] = []
+    duplicate_segment_count = 0
+    noisy_stats: Dict[str, int] = {
+        "rejected_repeated_key_fields": 0,
+        "rejected_field_heavy_cap": 0,
+        "kept_field_heavy": 0,
+        "total_rejected": 0,
+    }
+    raw_output = ""
+    normalized_output = ""
+    segment_truncation_count = 0
+    total_chars = 0
+    marker_count = 0
     try:
         for _ in range(2):
             (
                 segment_texts,
                 deduped_segment_texts,
+                filtered_segment_texts,
                 duplicate_segment_count,
-                noisy_segment_count,
+                noisy_stats,
                 raw_output,
                 normalized_output,
                 segment_truncation_count,
@@ -697,16 +750,20 @@ def _run_crop_first_ocr(
                 continue
 
             if marker_count > max_invoice_markers_per_page:
+                previous_marker_count = marker_count
                 normalized_output = _limit_invoice_sections(normalized_output, max_invoice_markers_per_page)
                 raw_output = normalized_output
                 marker_count = _count_invoice_markers(normalized_output)
                 total_chars = len(normalized_output)
+                marker_cap_rejected_markers_count += max(0, int(previous_marker_count - marker_count))
                 guardrail_marker_cap_applied = True
 
             if total_chars > max_total_chars:
+                previous_total_chars = total_chars
                 normalized_output = _truncate_text(normalized_output, max_total_chars)
                 raw_output = normalized_output
                 total_chars = len(normalized_output)
+                char_cap_trimmed_chars += max(0, int(previous_total_chars - total_chars))
                 guardrail_char_cap_applied = True
             break
         else:  # pragma: no cover - defensive safeguard
@@ -719,8 +776,9 @@ def _run_crop_first_ocr(
         (
             segment_texts,
             deduped_segment_texts,
+            filtered_segment_texts,
             duplicate_segment_count,
-            noisy_segment_count,
+            noisy_stats,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -729,8 +787,11 @@ def _run_crop_first_ocr(
             _segment_truncation_blocked,
         ) = _extract_output(plan)
         if total_chars > max_total_chars:
+            previous_total_chars = total_chars
             normalized_output = _truncate_text(normalized_output, max_total_chars)
             raw_output = normalized_output
+            total_chars = len(normalized_output)
+            char_cap_trimmed_chars += max(0, int(previous_total_chars - total_chars))
             guardrail_char_cap_applied = True
 
     if not normalize_text(raw_output) and not plan.used_full_page_fallback:
@@ -739,8 +800,9 @@ def _run_crop_first_ocr(
         (
             segment_texts,
             deduped_segment_texts,
+            filtered_segment_texts,
             duplicate_segment_count,
-            noisy_segment_count,
+            noisy_stats,
             raw_output,
             normalized_output,
             segment_truncation_count,
@@ -749,17 +811,30 @@ def _run_crop_first_ocr(
             _segment_truncation_blocked,
         ) = _extract_output(plan)
         if total_chars > max_total_chars:
+            previous_total_chars = total_chars
             normalized_output = _truncate_text(normalized_output, max_total_chars)
             raw_output = normalized_output
+            total_chars = len(normalized_output)
+            char_cap_trimmed_chars += max(0, int(previous_total_chars - total_chars))
             guardrail_char_cap_applied = True
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
+    ocr_latency_ms = float(timing_state.get("ocr_ms", 0.0))
+    postprocess_latency_ms = max(0.0, latency_ms - segmentation_latency_ms - ocr_latency_ms)
+    segments_total_count = len(segment_texts)
+    segments_after_dedup_count = len(deduped_segment_texts)
+    segments_kept_count = len(filtered_segment_texts)
+    segments_kept_ratio = float(segments_kept_count) / float(max(1, segments_total_count))
+    noisy_segment_count = int(noisy_stats.get("total_rejected", 0))
     return {
         "prediction": normalized_output,
         "extracted_text": normalized_output,
         "normalized_output": normalized_output,
         "raw_output": raw_output,
         "latency_ms": round(latency_ms, 3),
+        "segmentation_latency_ms": round(segmentation_latency_ms, 3),
+        "ocr_latency_ms": round(ocr_latency_ms, 3),
+        "postprocess_latency_ms": round(postprocess_latency_ms, 3),
         "requested_segmentation_mode": requested_mode,
         "segmentation_strategy": plan.strategy,
         "used_full_page_fallback": bool(plan.used_full_page_fallback),
@@ -768,17 +843,24 @@ def _run_crop_first_ocr(
         "original_crop_count": int(getattr(plan, "original_crop_count", len(plan.crop_regions))),
         "deduplicated_crop_count": int(getattr(plan, "deduplicated_crop_count", len(plan.crop_regions))),
         "duplicate_crop_count": int(getattr(plan, "duplicate_crop_count", 0)),
-        "segment_count": len(segment_texts),
-        "deduplicated_segment_count": len(deduped_segment_texts),
+        "segment_count": segments_total_count,
+        "deduplicated_segment_count": segments_after_dedup_count,
+        "segments_kept_count": segments_kept_count,
+        "segments_kept_ratio": round(segments_kept_ratio, 6),
         "duplicate_segment_count": int(duplicate_segment_count),
         "noisy_segment_count": int(noisy_segment_count),
+        "noisy_rejected_repeated_fields_count": int(noisy_stats.get("rejected_repeated_key_fields", 0)),
+        "noisy_rejected_field_heavy_cap_count": int(noisy_stats.get("rejected_field_heavy_cap", 0)),
+        "field_heavy_kept_count": int(noisy_stats.get("kept_field_heavy", 0)),
         "segment_truncation_count": int(segment_truncation_count),
         "max_chars_per_segment": int(max_chars_per_segment),
         "max_total_chars": int(max_total_chars),
         "max_invoice_markers_per_page": int(max_invoice_markers_per_page),
         "hard_truncate_segment_text": bool(hard_truncate_segment_text),
         "guardrail_marker_cap_applied": bool(guardrail_marker_cap_applied),
+        "marker_cap_rejected_markers_count": int(marker_cap_rejected_markers_count),
         "guardrail_char_cap_applied": bool(guardrail_char_cap_applied),
+        "char_cap_trimmed_chars": int(char_cap_trimmed_chars),
         "invoice_marker_count": int(marker_count),
         "max_crops": int(max_crops),
         "crop_batch_size": int(batch_size),

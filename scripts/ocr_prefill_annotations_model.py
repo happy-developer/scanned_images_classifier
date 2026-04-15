@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
     parser.add_argument("--max-chars-per-segment", type=int, default=256)
     parser.add_argument("--max-total-chars", type=int, default=1200)
-    parser.add_argument("--max-invoice-markers-per-page", type=int, default=1)
-    parser.add_argument("--max-crops", type=int, default=28)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument("--max-crops", type=int, default=16)
     parser.add_argument("--crop-batch-size", type=int, default=6)
     parser.add_argument("--hard-truncate-segment-text", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
@@ -150,3 +150,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

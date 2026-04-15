@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--output-dir", type=str, default="notebooks/artifacts/doc_understanding_ocr_cpu")
-    parser.add_argument("--model-name", type=str, default="microsoft/trocr-small-printed")
+    parser.add_argument("--model-name", type=str, default="microsoft/trocr-base-printed")
     parser.add_argument(
         "--train-csvs",
         type=str,
@@ -33,6 +33,18 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated training CSV list",
     )
     parser.add_argument("--eval-csv", type=str, default="")
+    parser.add_argument(
+        "--hors-template-eval-csv",
+        type=str,
+        default="",
+        help="Optional locked out-of-template eval CSV (overrides --eval-csv).",
+    )
+    parser.add_argument(
+        "--hors-template-image-subdir",
+        type=str,
+        default=".",
+        help="Image subdir used with --hors-template-eval-csv.",
+    )
     parser.add_argument(
         "--image-subdirs-train",
         type=str,
@@ -50,6 +62,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Optional comma-separated image subdirs matching --extra-train-csvs order.",
+    )
+    parser.add_argument(
+        "--real-train-csv",
+        type=str,
+        default="",
+        help="Convenience alias for one extra real annotated train CSV.",
+    )
+    parser.add_argument(
+        "--real-train-image-subdir",
+        type=str,
+        default=".",
+        help="Image subdir used with --real-train-csv.",
     )
     parser.add_argument("--image-subdir-eval", type=str, default="batch_2/batch_2/batch2_1")
     parser.add_argument("--max-train-samples", type=int, default=0)
@@ -132,8 +156,17 @@ def main() -> None:
         image_subdirs_train = tuple(s.strip() for s in args.image_subdirs_train.split(",") if s.strip())
         image_subdir_eval = args.image_subdir_eval
 
+    if args.hors_template_eval_csv:
+        eval_csv = args.hors_template_eval_csv.strip()
+        image_subdir_eval = args.hors_template_image_subdir.strip() or "."
+
     extra_train_csvs = tuple(s.strip() for s in args.extra_train_csvs.split(",") if s.strip())
     extra_image_subdirs = tuple(s.strip() for s in args.extra_image_subdirs_train.split(",") if s.strip())
+
+    if args.real_train_csv.strip():
+        extra_train_csvs = tuple(list(extra_train_csvs) + [args.real_train_csv.strip()])
+        extra_image_subdirs = tuple(list(extra_image_subdirs) + [args.real_train_image_subdir.strip() or "."])
+
     if extra_train_csvs:
         if not extra_image_subdirs:
             extra_image_subdirs = tuple("." for _ in extra_train_csvs)

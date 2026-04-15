@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
     parser.add_argument("--max-chars-per-segment", type=int, default=256)
     parser.add_argument("--max-total-chars", type=int, default=1200)
-    parser.add_argument("--max-invoice-markers-per-page", type=int, default=1)
-    parser.add_argument("--max-crops", type=int, default=28)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument("--max-crops", type=int, default=16)
     parser.add_argument("--crop-batch-size", type=int, default=6)
     parser.add_argument(
         "--hard-truncate-segment-text",
@@ -39,6 +39,71 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-wer", action="store_true", help="Skip WER computation")
     return parser.parse_args()
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _empty_diagnostics() -> dict[str, float]:
+    return {
+        "num_predictions": 0.0,
+        "segment_count_sum": 0.0,
+        "segments_after_dedup_sum": 0.0,
+        "segments_kept_sum": 0.0,
+        "duplicate_segment_count_sum": 0.0,
+        "noisy_segment_count_sum": 0.0,
+        "marker_cap_rejected_markers_sum": 0.0,
+        "char_cap_trimmed_chars_sum": 0.0,
+        "crop_count_sum": 0.0,
+        "segmentation_latency_ms_sum": 0.0,
+        "ocr_latency_ms_sum": 0.0,
+        "postprocess_latency_ms_sum": 0.0,
+    }
+
+
+def _accumulate_diagnostics(diag: dict[str, float], output: dict[str, object]) -> None:
+    diag["num_predictions"] += 1.0
+    diag["segment_count_sum"] += _safe_int(output.get("segment_count"), 0)
+    diag["segments_after_dedup_sum"] += _safe_int(output.get("deduplicated_segment_count"), 0)
+    diag["segments_kept_sum"] += _safe_int(output.get("segments_kept_count"), 0)
+    diag["duplicate_segment_count_sum"] += _safe_int(output.get("duplicate_segment_count"), 0)
+    diag["noisy_segment_count_sum"] += _safe_int(output.get("noisy_segment_count"), 0)
+    diag["marker_cap_rejected_markers_sum"] += _safe_int(output.get("marker_cap_rejected_markers_count"), 0)
+    diag["char_cap_trimmed_chars_sum"] += _safe_int(output.get("char_cap_trimmed_chars"), 0)
+    diag["crop_count_sum"] += _safe_int(output.get("crop_count"), 0)
+    diag["segmentation_latency_ms_sum"] += _safe_float(output.get("segmentation_latency_ms"), 0.0)
+    diag["ocr_latency_ms_sum"] += _safe_float(output.get("ocr_latency_ms"), 0.0)
+    diag["postprocess_latency_ms_sum"] += _safe_float(output.get("postprocess_latency_ms"), 0.0)
+
+
+def _finalize_diagnostics(diag: dict[str, float]) -> dict[str, float]:
+    n = max(1.0, diag["num_predictions"])
+    segment_total = max(1.0, diag["segment_count_sum"])
+    return {
+        "avg_crop_count": diag["crop_count_sum"] / n,
+        "avg_segment_count": diag["segment_count_sum"] / n,
+        "avg_segments_after_dedup_count": diag["segments_after_dedup_sum"] / n,
+        "avg_segments_kept_count": diag["segments_kept_sum"] / n,
+        "segments_kept_ratio": diag["segments_kept_sum"] / segment_total,
+        "duplicate_segment_ratio": diag["duplicate_segment_count_sum"] / segment_total,
+        "noisy_segment_ratio": diag["noisy_segment_count_sum"] / segment_total,
+        "avg_marker_cap_rejected_markers_count": diag["marker_cap_rejected_markers_sum"] / n,
+        "avg_char_cap_trimmed_chars": diag["char_cap_trimmed_chars_sum"] / n,
+        "avg_segmentation_latency_ms": diag["segmentation_latency_ms_sum"] / n,
+        "avg_ocr_latency_ms": diag["ocr_latency_ms_sum"] / n,
+        "avg_postprocess_latency_ms": diag["postprocess_latency_ms_sum"] / n,
+    }
 
 
 def _resolve_image_path(data_root: Path, row: dict[str, str], csv_path: Path) -> Path | None:
@@ -136,6 +201,7 @@ def main() -> None:
     predictions: dict[str, str] = {}
     sample_rows: list[dict[str, str]] = []
     total_latency_ms = 0.0
+    diag = _empty_diagnostics()
     for rec in records:
         out = predictor.predict(
             rec.image_path,
@@ -147,6 +213,7 @@ def main() -> None:
             max_crops=args.max_crops,
             crop_batch_size=args.crop_batch_size,
         )
+        _accumulate_diagnostics(diag, out)
         pred = str(out.get("prediction", ""))
         predictions[rec.img_name] = pred
         total_latency_ms += float(out.get("latency_ms", 0.0))
@@ -160,9 +227,10 @@ def main() -> None:
             )
 
     metrics = evaluate_records(records, predictions, compute_wer=not args.no_wer)
+    metrics.update(_finalize_diagnostics(diag))
 
     payload = {
-        "schema_version": "ocr_eval_annotated_set.v1",
+        "schema_version": "ocr_eval_annotated_set.v2",
         "mode": "supervised_validation",
         "quality_validation": True,
         "annotations_csv": str(annotations_csv),

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentation-mode", type=str, default="line_only", choices=("line_only", "line_block", "full_page"))
     parser.add_argument("--max-chars-per-segment", type=int, default=256)
     parser.add_argument("--max-total-chars", type=int, default=1200)
-    parser.add_argument("--max-invoice-markers-per-page", type=int, default=1)
-    parser.add_argument("--max-crops", type=int, default=28)
+    parser.add_argument("--max-invoice-markers-per-page", type=int, default=2)
+    parser.add_argument("--max-crops", type=int, default=16)
     parser.add_argument("--crop-batch-size", type=int, default=6)
     parser.add_argument(
         "--hard-truncate-segment-text",
@@ -68,6 +68,9 @@ def parse_args() -> argparse.Namespace:
         help="Truncate overlong segment text before joining.",
     )
     parser.add_argument("--latency-target-ms", type=float, default=20000.0)
+    parser.add_argument("--cer-target", type=float, default=0.70)
+    parser.add_argument("--field-exact-match-min", type=float, default=0.0)
+    parser.add_argument("--max-noisy-segment-ratio", type=float, default=0.60)
     parser.add_argument("--no-wer", action="store_true", help="Skip WER computation in supervised evaluation")
     return parser.parse_args()
 
@@ -93,6 +96,85 @@ def _build_infer_config(args: argparse.Namespace, artifacts_dir: Path):
         max_crops=args.max_crops,
         crop_batch_size=args.crop_batch_size,
     )
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _empty_diagnostics() -> dict[str, float]:
+    return {
+        "num_predictions": 0.0,
+        "segment_count_sum": 0.0,
+        "segments_after_dedup_sum": 0.0,
+        "segments_kept_sum": 0.0,
+        "duplicate_segment_count_sum": 0.0,
+        "noisy_segment_count_sum": 0.0,
+        "noisy_rejected_repeated_fields_sum": 0.0,
+        "noisy_rejected_field_heavy_cap_sum": 0.0,
+        "marker_cap_rejected_markers_sum": 0.0,
+        "char_cap_trimmed_chars_sum": 0.0,
+        "crop_count_sum": 0.0,
+        "guardrail_marker_cap_applied_count": 0.0,
+        "guardrail_char_cap_applied_count": 0.0,
+        "segmentation_latency_ms_sum": 0.0,
+        "ocr_latency_ms_sum": 0.0,
+        "postprocess_latency_ms_sum": 0.0,
+    }
+
+
+def _accumulate_diagnostics(diag: dict[str, float], output: dict[str, object]) -> None:
+    diag["num_predictions"] += 1.0
+    diag["segment_count_sum"] += _safe_int(output.get("segment_count"), 0)
+    diag["segments_after_dedup_sum"] += _safe_int(output.get("deduplicated_segment_count"), 0)
+    diag["segments_kept_sum"] += _safe_int(output.get("segments_kept_count"), 0)
+    diag["duplicate_segment_count_sum"] += _safe_int(output.get("duplicate_segment_count"), 0)
+    diag["noisy_segment_count_sum"] += _safe_int(output.get("noisy_segment_count"), 0)
+    diag["noisy_rejected_repeated_fields_sum"] += _safe_int(output.get("noisy_rejected_repeated_fields_count"), 0)
+    diag["noisy_rejected_field_heavy_cap_sum"] += _safe_int(output.get("noisy_rejected_field_heavy_cap_count"), 0)
+    diag["marker_cap_rejected_markers_sum"] += _safe_int(output.get("marker_cap_rejected_markers_count"), 0)
+    diag["char_cap_trimmed_chars_sum"] += _safe_int(output.get("char_cap_trimmed_chars"), 0)
+    diag["crop_count_sum"] += _safe_int(output.get("crop_count"), 0)
+    diag["guardrail_marker_cap_applied_count"] += 1.0 if bool(output.get("guardrail_marker_cap_applied", False)) else 0.0
+    diag["guardrail_char_cap_applied_count"] += 1.0 if bool(output.get("guardrail_char_cap_applied", False)) else 0.0
+    diag["segmentation_latency_ms_sum"] += _safe_float(output.get("segmentation_latency_ms"), 0.0)
+    diag["ocr_latency_ms_sum"] += _safe_float(output.get("ocr_latency_ms"), 0.0)
+    diag["postprocess_latency_ms_sum"] += _safe_float(output.get("postprocess_latency_ms"), 0.0)
+
+
+def _finalize_diagnostics(diag: dict[str, float]) -> dict[str, float]:
+    n = max(1.0, diag["num_predictions"])
+    segment_total = max(1.0, diag["segment_count_sum"])
+    return {
+        "avg_crop_count": diag["crop_count_sum"] / n,
+        "avg_segment_count": diag["segment_count_sum"] / n,
+        "avg_segments_after_dedup_count": diag["segments_after_dedup_sum"] / n,
+        "avg_segments_kept_count": diag["segments_kept_sum"] / n,
+        "segments_kept_ratio": diag["segments_kept_sum"] / segment_total,
+        "duplicate_segment_ratio": diag["duplicate_segment_count_sum"] / segment_total,
+        "noisy_segment_ratio": diag["noisy_segment_count_sum"] / segment_total,
+        "avg_duplicate_segment_count": diag["duplicate_segment_count_sum"] / n,
+        "avg_noisy_segment_count": diag["noisy_segment_count_sum"] / n,
+        "avg_noisy_rejected_repeated_fields_count": diag["noisy_rejected_repeated_fields_sum"] / n,
+        "avg_noisy_rejected_field_heavy_cap_count": diag["noisy_rejected_field_heavy_cap_sum"] / n,
+        "avg_marker_cap_rejected_markers_count": diag["marker_cap_rejected_markers_sum"] / n,
+        "avg_char_cap_trimmed_chars": diag["char_cap_trimmed_chars_sum"] / n,
+        "guardrail_marker_cap_applied_rate": diag["guardrail_marker_cap_applied_count"] / n,
+        "guardrail_char_cap_applied_rate": diag["guardrail_char_cap_applied_count"] / n,
+        "avg_segmentation_latency_ms": diag["segmentation_latency_ms_sum"] / n,
+        "avg_ocr_latency_ms": diag["ocr_latency_ms_sum"] / n,
+        "avg_postprocess_latency_ms": diag["postprocess_latency_ms_sum"] / n,
+    }
 
 
 def main() -> None:
@@ -121,7 +203,7 @@ def main() -> None:
         image_subdir_eval_arg = "."
 
     payload: dict = {
-        "schema_version": "ocr_image_eval.v4",
+        "schema_version": "ocr_image_eval.v5",
         "decode": {
             "max_new_tokens": args.max_new_tokens,
             "num_beams": args.num_beams,
@@ -140,6 +222,12 @@ def main() -> None:
         "image_size": args.image_size,
         "use_grayscale": not args.no_grayscale,
         "latency_target_ms": float(args.latency_target_ms),
+        "go_no_go_targets": {
+            "cer_target": float(args.cer_target),
+            "field_exact_match_min": float(args.field_exact_match_min),
+            "max_noisy_segment_ratio": float(args.max_noisy_segment_ratio),
+            "max_latency_ms": float(args.latency_target_ms),
+        },
         "quality_validation": False,
     }
     effective_size: int | None = None
@@ -159,9 +247,11 @@ def main() -> None:
         rows: list[dict[str, object]] = []
         total_latency = 0.0
         fallback_count = 0
+        diag = _empty_diagnostics()
 
         for rec in records:
             output = predictor.predict(rec.image_path)
+            _accumulate_diagnostics(diag, output)
             if effective_size is None:
                 effective_size = int(output.get("effective_image_size", args.image_size))
             pred = str(output.get("prediction", ""))
@@ -178,6 +268,15 @@ def main() -> None:
                     "latency_ms": lat,
                     "used_full_page_fallback": used_fallback,
                     "fallback_reason": output.get("fallback_reason"),
+                    "segment_count": _safe_int(output.get("segment_count"), 0),
+                    "segments_kept_count": _safe_int(output.get("segments_kept_count"), 0),
+                    "noisy_segment_count": _safe_int(output.get("noisy_segment_count"), 0),
+                    "duplicate_segment_count": _safe_int(output.get("duplicate_segment_count"), 0),
+                    "marker_cap_rejected_markers_count": _safe_int(output.get("marker_cap_rejected_markers_count"), 0),
+                    "char_cap_trimmed_chars": _safe_int(output.get("char_cap_trimmed_chars"), 0),
+                    "segmentation_latency_ms": _safe_float(output.get("segmentation_latency_ms"), 0.0),
+                    "ocr_latency_ms": _safe_float(output.get("ocr_latency_ms"), 0.0),
+                    "postprocess_latency_ms": _safe_float(output.get("postprocess_latency_ms"), 0.0),
                 }
             )
 
@@ -190,6 +289,23 @@ def main() -> None:
         metrics["full_page_fallback_rate"] = fallback_count / n
         metrics["latency_target_ms"] = float(args.latency_target_ms)
         metrics["latency_target_met"] = bool(avg_latency_ms <= float(args.latency_target_ms))
+        metrics.update(_finalize_diagnostics(diag))
+        metrics["cer_target"] = float(args.cer_target)
+        metrics["cer_target_met"] = bool(_safe_float(metrics.get("cer"), 1.0) < float(args.cer_target))
+        metrics["field_exact_match_min"] = float(args.field_exact_match_min)
+        metrics["field_exact_match_target_met"] = bool(
+            _safe_float(metrics.get("field_exact_match_overall"), 0.0) > float(args.field_exact_match_min)
+        )
+        metrics["max_noisy_segment_ratio"] = float(args.max_noisy_segment_ratio)
+        metrics["noisy_segment_ratio_target_met"] = bool(
+            _safe_float(metrics.get("noisy_segment_ratio"), 1.0) <= float(args.max_noisy_segment_ratio)
+        )
+        metrics["go_no_go_ready_for_epoch8"] = bool(
+            metrics.get("cer_target_met")
+            and metrics.get("field_exact_match_target_met")
+            and metrics.get("latency_target_met")
+            and metrics.get("noisy_segment_ratio_target_met")
+        )
         payload["metrics"] = metrics
         payload["metrics_kind"] = "supervised_quality"
         payload["num_samples"] = len(records)
@@ -217,8 +333,10 @@ def main() -> None:
         rows = []
         lat_sum = 0.0
         fallback_count = 0
+        diag = _empty_diagnostics()
         for p in image_paths:
             out = predictor.predict(p)
+            _accumulate_diagnostics(diag, out)
             if effective_size is None:
                 effective_size = int(out.get("effective_image_size", args.image_size))
             pred = str(out.get("prediction", ""))
@@ -231,6 +349,15 @@ def main() -> None:
                     "latency_ms": lat,
                     "used_full_page_fallback": used_fallback,
                     "fallback_reason": out.get("fallback_reason"),
+                    "segment_count": _safe_int(out.get("segment_count"), 0),
+                    "segments_kept_count": _safe_int(out.get("segments_kept_count"), 0),
+                    "noisy_segment_count": _safe_int(out.get("noisy_segment_count"), 0),
+                    "duplicate_segment_count": _safe_int(out.get("duplicate_segment_count"), 0),
+                    "marker_cap_rejected_markers_count": _safe_int(out.get("marker_cap_rejected_markers_count"), 0),
+                    "char_cap_trimmed_chars": _safe_int(out.get("char_cap_trimmed_chars"), 0),
+                    "segmentation_latency_ms": _safe_float(out.get("segmentation_latency_ms"), 0.0),
+                    "ocr_latency_ms": _safe_float(out.get("ocr_latency_ms"), 0.0),
+                    "postprocess_latency_ms": _safe_float(out.get("postprocess_latency_ms"), 0.0),
                 }
             )
             lat_sum += lat
@@ -249,6 +376,11 @@ def main() -> None:
         summary["full_page_fallback_rate"] = fallback_rate
         summary["latency_target_ms"] = float(args.latency_target_ms)
         summary["latency_target_met"] = bool(avg_latency_ms <= float(args.latency_target_ms))
+        summary.update(_finalize_diagnostics(diag))
+        summary["cer_target"] = float(args.cer_target)
+        summary["field_exact_match_min"] = float(args.field_exact_match_min)
+        summary["max_noisy_segment_ratio"] = float(args.max_noisy_segment_ratio)
+        summary["go_no_go_ready_for_epoch8"] = False
 
         print(
             "WARNING: unlabeled evaluation mode is inference-only; it does not measure CER/WER quality.",
@@ -280,3 +412,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
